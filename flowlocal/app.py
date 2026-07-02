@@ -126,13 +126,7 @@ class App:
         """Pre-load the STT model (and JIT CUDA kernels) plus the Ollama
         model so the first real dictation responds at full speed.
         """
-        try:
-            import numpy as np
-
-            self.transcriber.transcribe(np.zeros(8000, dtype=np.float32))
-            logger.info("Transcriber warmed up")
-        except Exception as exc:
-            logger.warning("Transcriber warmup failed: %s", exc)
+        self.transcriber.warmup()
         cleaner.warmup(self.cfg)
 
     def quit(self) -> None:
@@ -310,6 +304,11 @@ class App:
                     self._busy = False
 
     def _process(self, audio) -> None:
+        import time
+
+        audio_seconds = len(audio) / 16000.0 if audio is not None else 0.0
+
+        stt_start = time.monotonic()
         try:
             raw_text = self.transcriber.transcribe(audio, language=self.cfg.language)
         except Exception as exc:
@@ -317,14 +316,18 @@ class App:
             sounds.play_error(self.cfg)
             self.tray.notify(f"Transcription failed: {exc}")
             return
+        stt_elapsed = time.monotonic() - stt_start
 
         if not raw_text:
             return  # silence/empty: skip silently
 
+        clean_start = time.monotonic()
         clean_text = cleaner.clean(raw_text, self.cfg)
+        clean_elapsed = time.monotonic() - clean_start
         if not clean_text:
             return
 
+        inject_start = time.monotonic()
         try:
             injector.inject(clean_text)
         except injector.InjectionFallback as exc:
@@ -335,3 +338,9 @@ class App:
             logger.error("Unexpected injection error: %s", exc)
             sounds.play_error(self.cfg)
             self.tray.notify(f"Injection error: {exc}")
+        finally:
+            inject_elapsed = time.monotonic() - inject_start
+            logger.info(
+                "dictation: %.1fs audio | stt %.2fs | clean %.2fs | inject %.2fs",
+                audio_seconds, stt_elapsed, clean_elapsed, inject_elapsed,
+            )

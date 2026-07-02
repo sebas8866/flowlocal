@@ -10,8 +10,12 @@ import logging
 import os
 import sys
 import threading
+import time
 
 logger = logging.getLogger(__name__)
+
+# Beam size used for GPU transcribe calls. CPU stays at beam 1.
+BEAM_SIZE = 2
 
 # Maps friendly/preset model names to the faster-whisper model id to try
 # first. If that fails, a Hugging Face CT2 mirror is tried as a fallback.
@@ -90,8 +94,9 @@ class Transcriber:
         return self._device
 
     def reload(self, model_name: str) -> None:
-        """Switch to a different model; unloads the current one so the next
-        transcribe() call lazily loads the new model.
+        """Switch to a different model and immediately load + warm it, so
+        it's ready by the time the user next dictates instead of lazily
+        loading (with online HF checks) on the next transcribe() call.
         """
         with self._lock:
             self.model_name = model_name
@@ -99,6 +104,9 @@ class Transcriber:
             self._device = None
             self._compute_type = None
             self._forced_cpu = False
+            self._ensure_loaded()
+
+        self.warmup()
 
     def _resolve_model_id(self):
         alias = _MODEL_ALIASES.get(self.model_name)
@@ -125,31 +133,69 @@ class Transcriber:
         last_exc = None
         for device, compute_type in attempts:
             for model_id in candidates:
-                try:
-                    model = WhisperModel(model_id, device=device, compute_type=compute_type)
-                    self._model = model
-                    self._device = device
-                    self._compute_type = compute_type
-                    if device == "cpu":
-                        self._forced_cpu = True
-                    logger.info(
-                        "Loaded whisper model '%s' on device=%s compute_type=%s",
-                        model_id, device, compute_type,
-                    )
-                    return
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to load model '%s' on device=%s (%s): %s",
-                        model_id, device, compute_type, exc,
-                    )
-                    last_exc = exc
-                    continue
+                # Try the local HF cache first (zero network, no online
+                # revision check); only fall back to a network-enabled load
+                # if the model isn't cached locally yet.
+                for local_files_only in (True, False):
+                    try:
+                        model = WhisperModel(
+                            model_id,
+                            device=device,
+                            compute_type=compute_type,
+                            local_files_only=local_files_only,
+                        )
+                        self._model = model
+                        self._device = device
+                        self._compute_type = compute_type
+                        if device == "cpu":
+                            self._forced_cpu = True
+                        logger.info(
+                            "Loaded whisper model '%s' on device=%s compute_type=%s "
+                            "local_files_only=%s",
+                            model_id, device, compute_type, local_files_only,
+                        )
+                        return
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to load model '%s' on device=%s (%s) "
+                            "local_files_only=%s: %s",
+                            model_id, device, compute_type, local_files_only, exc,
+                        )
+                        last_exc = exc
+                        continue
 
         raise RuntimeError(f"Could not load any whisper model candidate") from last_exc
 
     def _ensure_loaded(self):
         if self._model is None:
             self._load_model()
+
+    def warmup(self) -> None:
+        """Force the model to load now (not lazily) and run one real dummy
+        inference that cannot early-exit on silence, so CUDA kernels/JIT
+        and any first-call overhead are paid before the user's first real
+        dictation.
+        """
+        start = time.monotonic()
+        try:
+            import numpy as np
+
+            with self._lock:
+                self._ensure_loaded()
+
+                dummy_audio = (
+                    np.random.default_rng(0).standard_normal(16000).astype("float32") * 0.01
+                )
+                segments, _info = self._model.transcribe(
+                    dummy_audio,
+                    vad_filter=False,
+                )
+                list(segments)
+        except Exception as exc:
+            logger.warning("Transcriber warmup failed: %s", exc)
+            return
+
+        logger.info("Transcriber warmup completed in %.2fs", time.monotonic() - start)
 
     def transcribe(self, audio_np, language: str = None) -> str:
         """Transcribe a mono 16kHz float32 numpy array. Returns "" for
@@ -163,10 +209,13 @@ class Transcriber:
         if float(np.abs(audio_np).max()) < 1e-4:
             return ""
 
+        start = time.monotonic()
+        audio_seconds = len(audio_np) / 16000.0
+
         with self._lock:
             self._ensure_loaded()
 
-            beam_size = 1 if self._device == "cpu" else 5
+            beam_size = 1 if self._device == "cpu" else BEAM_SIZE
 
             try:
                 segments, _info = self._model.transcribe(
@@ -177,7 +226,7 @@ class Transcriber:
                     condition_on_previous_text=False,
                 )
                 texts = [seg.text.strip() for seg in segments]
-                return " ".join(t for t in texts if t).strip()
+                result = " ".join(t for t in texts if t).strip()
             except Exception as exc:
                 if self._forced_cpu:
                     logger.error("Transcription failed even on CPU fallback: %s", exc)
@@ -198,4 +247,10 @@ class Transcriber:
                     condition_on_previous_text=False,
                 )
                 texts = [seg.text.strip() for seg in segments]
-                return " ".join(t for t in texts if t).strip()
+                result = " ".join(t for t in texts if t).strip()
+
+        logger.info(
+            "Transcribed %.2fs audio in %.2fs",
+            audio_seconds, time.monotonic() - start,
+        )
+        return result

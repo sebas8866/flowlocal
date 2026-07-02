@@ -30,6 +30,9 @@ def _setup_logging() -> None:
     root_logger.setLevel(logging.INFO)
     root_logger.addHandler(handler)
 
+    for noisy_logger in ("httpx", "huggingface_hub", "urllib3"):
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
 
 def main() -> int:
     _setup_logging()
