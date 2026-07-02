@@ -1,0 +1,296 @@
+"""Settings window (tkinter/ttk).
+
+THREADING MODEL (must match flowlocal/app.py):
+tkinter's Tcl interpreter is not thread-safe and must run its mainloop on
+the process's MAIN thread. This app therefore runs the tk root window,
+hidden (withdrawn), in the main thread's mainloop for the lifetime of the
+process. pystray's tray icon runs *detached* on its own background thread
+(`Tray.run_detached()`), and the pynput listeners run on their own daemon
+threads. The worker/pipeline also runs on a background thread.
+
+This module's `open_settings()` therefore does NOT create its own Tk root
+or its own mainloop — it is called from the main thread (directly, or
+marshalled onto the main thread via `root.after(0, ...)` if triggered from
+a background thread such as the tray menu callback) and simply creates a
+`Toplevel` attached to the shared hidden root. All tkinter widget creation
+and mutation in this module happens on the main thread only.
+
+Only one settings window may be open at a time; calling `open_settings`
+again while one is open focuses the existing window instead of creating a
+new one.
+"""
+from __future__ import annotations
+
+import logging
+from typing import Callable, Dict, Optional
+
+logger = logging.getLogger(__name__)
+
+_MODEL_PRESETS = [
+    ("large-v3-turbo", "Accurate (large-v3-turbo)"),
+    ("distil-large-v3", "Fast (distil-large-v3)"),
+    ("small", "Light (small, CPU-friendly)"),
+]
+
+_current_window = None  # module-level singleton guard
+
+
+def _model_label_to_value(label: str) -> Optional[str]:
+    for value, lbl in _MODEL_PRESETS:
+        if lbl == label:
+            return value
+    return None
+
+
+def _model_value_to_label(value: str) -> str:
+    for v, lbl in _MODEL_PRESETS:
+        if v == value:
+            return lbl
+    return _MODEL_PRESETS[0][1]
+
+
+def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
+    """Open (or focus) the settings window.
+
+    `root` is the shared hidden Tk root running the main-thread mainloop.
+    `cfg` is the live Config instance.
+    `deps` is a dict of callbacks:
+        list_devices() -> list[(index, name)]
+        on_mic_change(index_or_none)
+        on_trigger_change(binding_str)
+        on_mode_change(mode_str)
+        on_model_change(model_name)
+        on_language_change(lang_or_none)
+        on_clean_fillers_change(bool)
+        on_clean_llm_change(bool)
+        on_sounds_change(bool)
+        on_autostart_change(bool)
+        ollama_available() -> bool
+        capture_next(callback) -> None  # TriggerManager.capture_next
+        cancel_capture() -> None
+    """
+    import tkinter as tk
+    from tkinter import ttk
+
+    global _current_window
+
+    if _current_window is not None and _current_window.winfo_exists():
+        _current_window.deiconify()
+        _current_window.lift()
+        _current_window.focus_force()
+        return
+
+    win = tk.Toplevel(root)
+    _current_window = win
+    win.title("FlowLocal Settings")
+    win.resizable(False, False)
+
+    def _on_close():
+        global _current_window
+        cancel_capture = deps.get("cancel_capture")
+        if cancel_capture:
+            try:
+                cancel_capture()
+            except Exception:
+                pass
+        _current_window = None
+        win.destroy()
+
+    win.protocol("WM_DELETE_WINDOW", _on_close)
+
+    frame = ttk.Frame(win, padding=12)
+    frame.grid(row=0, column=0, sticky="nsew")
+
+    row = 0
+
+    # --- Microphone ---------------------------------------------------
+    ttk.Label(frame, text="Microphone:").grid(row=row, column=0, sticky="w", pady=4)
+    list_devices = deps.get("list_devices")
+    devices = list_devices() if list_devices else []
+    mic_values = ["System default"] + [name for _idx, name in devices]
+    mic_index_by_name = {name: idx for idx, name in devices}
+
+    mic_var = tk.StringVar()
+    current_name = "System default"
+    if cfg.mic_device is not None:
+        for idx, name in devices:
+            if idx == cfg.mic_device:
+                current_name = name
+                break
+    mic_var.set(current_name)
+    mic_combo = ttk.Combobox(
+        frame, textvariable=mic_var, values=mic_values, state="readonly", width=32
+    )
+    mic_combo.grid(row=row, column=1, sticky="ew", pady=4)
+    row += 1
+
+    # --- Trigger --------------------------------------------------------
+    ttk.Label(frame, text="Trigger:").grid(row=row, column=0, sticky="w", pady=4)
+    trigger_var = tk.StringVar(value=cfg.trigger)
+    trigger_label = ttk.Label(frame, textvariable=trigger_var, width=20, relief="sunken")
+    trigger_label.grid(row=row, column=1, sticky="w", pady=4)
+    row += 1
+
+    def _on_captured(binding: str) -> None:
+        def _apply():
+            trigger_var.set(binding)
+            rebind_btn.config(text="Rebind…", state="normal")
+            on_trigger_change = deps.get("on_trigger_change")
+            if on_trigger_change:
+                on_trigger_change(binding)
+
+        win.after(0, _apply)
+
+    def _start_capture() -> None:
+        capture_next = deps.get("capture_next")
+        if not capture_next:
+            return
+        rebind_btn.config(text="Press a key or mouse side button…", state="disabled")
+        capture_next(_on_captured)
+
+    rebind_btn = ttk.Button(frame, text="Rebind…", command=_start_capture)
+    rebind_btn.grid(row=row, column=1, sticky="w", pady=(0, 8))
+    row += 1
+
+    # --- Mode -------------------------------------------------------------
+    ttk.Label(frame, text="Mode:").grid(row=row, column=0, sticky="w", pady=4)
+    mode_var = tk.StringVar(value=cfg.mode)
+    mode_frame = ttk.Frame(frame)
+    mode_frame.grid(row=row, column=1, sticky="w", pady=4)
+    ttk.Radiobutton(mode_frame, text="Hold", variable=mode_var, value="hold").pack(
+        side="left"
+    )
+    ttk.Radiobutton(mode_frame, text="Toggle", variable=mode_var, value="toggle").pack(
+        side="left"
+    )
+    row += 1
+
+    # --- Model --------------------------------------------------------
+    ttk.Label(frame, text="Model:").grid(row=row, column=0, sticky="w", pady=4)
+    model_var = tk.StringVar(value=_model_value_to_label(cfg.model))
+    model_combo = ttk.Combobox(
+        frame,
+        textvariable=model_var,
+        values=[lbl for _v, lbl in _MODEL_PRESETS],
+        state="readonly",
+        width=32,
+    )
+    model_combo.grid(row=row, column=1, sticky="ew", pady=4)
+    row += 1
+
+    # --- Language -----------------------------------------------------
+    ttk.Label(frame, text="Language (blank=auto):").grid(
+        row=row, column=0, sticky="w", pady=4
+    )
+    language_var = tk.StringVar(value=cfg.language or "")
+    language_entry = ttk.Entry(frame, textvariable=language_var, width=34)
+    language_entry.grid(row=row, column=1, sticky="ew", pady=4)
+    row += 1
+
+    # --- Checkboxes -----------------------------------------------------
+    fillers_var = tk.BooleanVar(value=cfg.clean_fillers)
+    ttk.Checkbutton(frame, text="Remove filler words", variable=fillers_var).grid(
+        row=row, column=0, columnspan=2, sticky="w", pady=2
+    )
+    row += 1
+
+    ollama_available = deps.get("ollama_available")
+    ollama_status = "detected" if (ollama_available and ollama_available()) else "not found"
+    llm_var = tk.BooleanVar(value=cfg.clean_llm)
+    ttk.Checkbutton(
+        frame,
+        text=f"LLM cleanup (Ollama: {ollama_status})",
+        variable=llm_var,
+    ).grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
+    row += 1
+
+    sounds_var = tk.BooleanVar(value=cfg.sounds)
+    ttk.Checkbutton(frame, text="Sounds", variable=sounds_var).grid(
+        row=row, column=0, columnspan=2, sticky="w", pady=2
+    )
+    row += 1
+
+    autostart_var = tk.BooleanVar(value=cfg.autostart)
+    ttk.Checkbutton(frame, text="Start with Windows", variable=autostart_var).grid(
+        row=row, column=0, columnspan=2, sticky="w", pady=2
+    )
+    row += 1
+
+    # --- Save/Cancel ------------------------------------------------------
+    button_frame = ttk.Frame(frame)
+    button_frame.grid(row=row, column=0, columnspan=2, sticky="e", pady=(12, 0))
+
+    def _on_save() -> None:
+        mic_name = mic_var.get()
+        mic_index = mic_index_by_name.get(mic_name) if mic_name != "System default" else None
+        if mic_index != cfg.mic_device:
+            cfg.mic_device = mic_index
+            cb = deps.get("on_mic_change")
+            if cb:
+                cb(mic_index)
+
+        new_trigger = trigger_var.get()
+        if new_trigger != cfg.trigger:
+            cfg.trigger = new_trigger
+            cb = deps.get("on_trigger_change")
+            if cb:
+                cb(new_trigger)
+
+        new_mode = mode_var.get()
+        if new_mode != cfg.mode:
+            cfg.mode = new_mode
+            cb = deps.get("on_mode_change")
+            if cb:
+                cb(new_mode)
+
+        new_model = _model_label_to_value(model_var.get())
+        if new_model and new_model != cfg.model:
+            cfg.model = new_model
+            cb = deps.get("on_model_change")
+            if cb:
+                cb(new_model)
+
+        new_language = language_var.get().strip() or None
+        if new_language != cfg.language:
+            cfg.language = new_language
+            cb = deps.get("on_language_change")
+            if cb:
+                cb(new_language)
+
+        new_fillers = fillers_var.get()
+        if new_fillers != cfg.clean_fillers:
+            cfg.clean_fillers = new_fillers
+            cb = deps.get("on_clean_fillers_change")
+            if cb:
+                cb(new_fillers)
+
+        new_llm = llm_var.get()
+        if new_llm != cfg.clean_llm:
+            cfg.clean_llm = new_llm
+            cb = deps.get("on_clean_llm_change")
+            if cb:
+                cb(new_llm)
+
+        new_sounds = sounds_var.get()
+        if new_sounds != cfg.sounds:
+            cfg.sounds = new_sounds
+            cb = deps.get("on_sounds_change")
+            if cb:
+                cb(new_sounds)
+
+        new_autostart = autostart_var.get()
+        if new_autostart != cfg.autostart:
+            cfg.autostart = new_autostart
+            cb = deps.get("on_autostart_change")
+            if cb:
+                cb(new_autostart)
+
+        cfg.save()
+        _on_close()
+
+    ttk.Button(button_frame, text="Cancel", command=_on_close).pack(side="right", padx=(6, 0))
+    ttk.Button(button_frame, text="Save", command=_on_save).pack(side="right")
+
+    win.deiconify()
+    win.lift()
+    win.focus_force()
