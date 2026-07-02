@@ -219,7 +219,7 @@ def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
 
     show_overlay_var = tk.BooleanVar(value=cfg.show_overlay)
     ttk.Checkbutton(
-        frame, text="Show text popup after dictation", variable=show_overlay_var
+        frame, text="Floating status circle + text popup", variable=show_overlay_var
     ).grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
     row += 1
 

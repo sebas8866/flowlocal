@@ -6,3 +6,4 @@ pystray>=0.19
 Pillow
 pywin32
 requests
+comtypes

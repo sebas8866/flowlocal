@@ -27,6 +27,7 @@ from typing import Optional
 from flowlocal import config as config_mod
 from flowlocal import sounds
 from flowlocal import cleaner
+from flowlocal import focus
 from flowlocal import injector
 from flowlocal import overlay
 from flowlocal import tray as tray_mod
@@ -110,7 +111,7 @@ class App:
 
         self._tk_root = tk.Tk()
         self._tk_root.withdraw()
-        overlay.start_poller(self._tk_root)
+        overlay.start_poller(self._tk_root, enabled=self.cfg.show_overlay)
 
         self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker_thread.start()
@@ -130,6 +131,9 @@ class App:
         """
         self.transcriber.warmup()
         cleaner.warmup(self.cfg)
+        # First focus.is_text_input_focused() call pays one-time comtypes
+        # codegen (~0.5s); do it now so dictations never do.
+        focus.is_text_input_focused()
 
     def quit(self) -> None:
         if self._tk_root is not None:
@@ -230,6 +234,7 @@ class App:
 
     def _on_show_overlay_change(self, value: bool) -> None:
         self.cfg.show_overlay = value
+        overlay.set_enabled_threadsafe(value)
 
     def _on_autostart_change(self, value: bool) -> None:
         self.cfg.autostart = value
@@ -270,6 +275,7 @@ class App:
 
         sounds.play_start(self.cfg)
         self.tray.set_state(tray_mod.STATE_RECORDING)
+        overlay.set_state_threadsafe(overlay.STATE_RECORDING)
 
     def _on_trigger_release(self) -> None:
         with self._busy_lock:
@@ -283,12 +289,14 @@ class App:
             sounds.play_error(self.cfg)
             self.tray.notify(f"Recording error: {exc}")
             self.tray.set_state(tray_mod.STATE_IDLE)
+            overlay.set_state_threadsafe(overlay.STATE_IDLE)
             with self._busy_lock:
                 self._busy = False
             return
 
         sounds.play_stop(self.cfg)
         self.tray.set_state(tray_mod.STATE_TRANSCRIBING)
+        overlay.set_state_threadsafe(overlay.STATE_TRANSCRIBING)
         self._work_queue.put(audio)
 
     # --- worker thread ----------------------------------------------------
@@ -306,6 +314,7 @@ class App:
                 self.tray.notify("Dictation failed — see log for details")
             finally:
                 self.tray.set_state(tray_mod.STATE_IDLE)
+                overlay.set_state_threadsafe(overlay.STATE_IDLE)
                 with self._busy_lock:
                     self._busy = False
 
@@ -333,6 +342,8 @@ class App:
         if not clean_text:
             return
 
+        text_input_focused = focus.is_text_input_focused()
+
         inject_start = time.monotonic()
         try:
             injector.inject(clean_text)
@@ -340,15 +351,15 @@ class App:
             logger.warning("Injection failed: %s", exc)
             sounds.play_error(self.cfg)
             self.tray.notify("Paste failed — text is on your clipboard")
-            if self.cfg.show_overlay:
-                overlay.show_toast_threadsafe(clean_text)
+            overlay.notify_result_threadsafe(clean_text, landed_in_textbox=False)
         except Exception as exc:
             logger.error("Unexpected injection error: %s", exc)
             sounds.play_error(self.cfg)
             self.tray.notify(f"Injection error: {exc}")
         else:
-            if self.cfg.show_overlay:
-                overlay.show_toast_threadsafe(clean_text)
+            overlay.notify_result_threadsafe(
+                clean_text, landed_in_textbox=text_input_focused
+            )
         finally:
             inject_elapsed = time.monotonic() - inject_start
             logger.info(
