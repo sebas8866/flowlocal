@@ -27,6 +27,12 @@ _STUCK_KEY_TIMEOUT_SECONDS = 30.0
 _WM_XBUTTONDOWN = 0x020B
 _WM_XBUTTONUP = 0x020C
 
+# Windows raw keyboard message codes, for the keyboard win32_event_filter.
+_WM_KEYDOWN = 0x0100
+_WM_KEYUP = 0x0101
+_WM_SYSKEYDOWN = 0x0104
+_WM_SYSKEYUP = 0x0105
+
 # Bare-modifier key names that must never be captured alone as a binding
 # (see capture guard, #7): waiting continues until a non-modifier key or a
 # mouse x-button arrives.
@@ -84,6 +90,27 @@ _NAMED_KEY_VKS = {
     "f5": 0x74, "f6": 0x75, "f7": 0x76, "f8": 0x77,
     "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B,
 }
+
+# Reverse map (vk -> canonical name) for resolving low-level events back to
+# a bindable name inside the event filters. Built first-wins so aliases that
+# share a vk (alt_r/alt_gr, cmd_l/cmd) resolve to the primary name.
+_VK_TO_NAME: Dict[int, str] = {}
+for _name, _vk in _NAMED_KEY_VKS.items():
+    _VK_TO_NAME.setdefault(_vk, _name)
+del _name, _vk
+
+
+def _vk_to_key_name(vk: int) -> Optional[str]:
+    """Resolve a Windows virtual-key code to the canonical binding name, or
+    None when the key can't be named from the low-level event alone (e.g.
+    layout-dependent OEM keys)."""
+    name = _VK_TO_NAME.get(vk)
+    if name is not None:
+        return name
+    # Digits 0-9 and letters A-Z map directly to their ASCII characters.
+    if 0x30 <= vk <= 0x39 or 0x41 <= vk <= 0x5A:
+        return chr(vk).lower()
+    return None
 
 
 def _key_to_name(key) -> Optional[str]:
@@ -239,13 +266,14 @@ class TriggerManager:
     # --- win32 event filters (run before on_press/on_release/on_click) -----
     #
     # These run on the hook thread BEFORE the normal on_press/on_release/
-    # on_click callbacks. Calling listener.suppress_event() inside a filter
-    # stops the event from propagating to the focused app underneath, but
-    # our own on_press/on_release/on_click callbacks still fire normally
-    # afterward (suppression only affects the OS-level propagation, not
-    # pynput's own listener callbacks). We only ever suppress events that
-    # match the current binding (or, during capture, the press being
-    # captured) — everything else must pass through untouched.
+    # on_click callbacks. IMPORTANT pynput semantics: calling
+    # listener.suppress_event() raises an exception that unwinds out of the
+    # filter immediately — the event is suppressed system-wide AND never
+    # reaches our own on_press/on_release/on_click callbacks. So whenever a
+    # filter decides to suppress a bound event, it must dispatch the trigger
+    # handling itself (via the shared _handle_* methods) before suppressing.
+    # Everything that doesn't match the binding (or an active capture) must
+    # pass through untouched and is handled by the normal callbacks.
 
     def _keyboard_event_filter(self, msg, data) -> None:
         if not self.suppress_enabled:
@@ -259,31 +287,51 @@ class TriggerManager:
         if listener is None:
             return
 
-        vk = getattr(data, "vk", None)
+        # KBDLLHOOKSTRUCT names the field vkCode (not vk).
+        vk = getattr(data, "vkCode", None)
         if vk is None:
             return
+        pressed = msg in (_WM_KEYDOWN, _WM_SYSKEYDOWN)
 
         if capturing:
-            # Any non-modifier key press is about to be captured as the new
-            # binding; suppress it too so it doesn't leak to the focused
-            # app. Modifier-only presses fall through untouched (they are
-            # ignored by the capture logic and never leak anything
-            # dictation-related).
+            # A non-modifier key press is about to become the new binding:
+            # deliver it to the capture logic ourselves, then suppress so it
+            # doesn't leak to the focused app. Modifier-only presses fall
+            # through untouched (capture ignores them). Keys we can't name
+            # from the raw vk also fall through so the normal callback can
+            # still complete the capture (that one press leaks, which beats
+            # swallowing keys we then can't deliver anywhere).
             if vk in _MODIFIER_KEY_VKS:
                 return
-            listener.suppress_event()
+            name = _vk_to_key_name(vk)
+            if name is None:
+                return
+            try:
+                if pressed:
+                    self._handle_key_press(name)
+            finally:
+                listener.suppress_event()
             return
 
         if spec["type"] != "key":
             return
 
-        # Only suppress when this vk corresponds to one of the bound keys
-        # AND matches a key name actually present in the binding. We can't
-        # resolve vk -> canonical name without constructing a KeyCode, so
-        # compare against the set of vks for the current binding (computed
-        # lazily/cached on the spec).
+        # Only single-key bindings are suppressed. For combos (e.g.
+        # ctrl_l+f9) suppressing the individual keys would swallow plain
+        # Ctrl presses system-wide, so combos take the normal (unsuppressed)
+        # callback path instead.
+        if len(spec["keys"]) != 1:
+            return
         bound_vks = self._bound_key_vks()
-        if bound_vks and vk in bound_vks:
+        if not bound_vks or vk not in bound_vks:
+            return
+        name = next(iter(spec["keys"]))
+        try:
+            if pressed:
+                self._handle_key_press(name)
+            else:
+                self._handle_key_release(name)
+        finally:
             listener.suppress_event()
 
     def _mouse_event_filter(self, msg, data) -> None:
@@ -315,12 +363,13 @@ class TriggerManager:
         else:
             return
 
-        if capturing:
-            listener.suppress_event()
-            return
-
-        if spec["type"] == "mouse" and spec["button"] == name:
-            listener.suppress_event()
+        if capturing or (spec["type"] == "mouse" and spec["button"] == name):
+            # Suppressed events never reach _on_click, so run the trigger
+            # handling here before swallowing the event.
+            try:
+                self._handle_x_button(name, msg == _WM_XBUTTONDOWN)
+            finally:
+                listener.suppress_event()
 
     def _bound_key_vks(self):
         """Return the set of virtual-key codes for the current key binding,
@@ -363,7 +412,9 @@ class TriggerManager:
         name = _key_to_name(key)
         if name is None:
             return
+        self._handle_key_press(name)
 
+    def _handle_key_press(self, name: str) -> None:
         cancel_cb = None
 
         with self._lock:
@@ -418,7 +469,9 @@ class TriggerManager:
         name = _key_to_name(key)
         if name is None:
             return
+        self._handle_key_release(name)
 
+    def _handle_key_release(self, name: str) -> None:
         with self._lock:
             self._held_keys.discard(name)
             self._held_key_times.pop(name, None)
@@ -438,7 +491,7 @@ class TriggerManager:
 
     # --- mouse events --------------------------------------------------
 
-    def _on_click(self, x, y, button, pressed) -> None:
+    def _on_click(self, x, y, button, pressed, injected=False) -> None:
         from pynput.mouse import Button
 
         name = None
@@ -448,7 +501,9 @@ class TriggerManager:
             name = "x2"
         else:
             return
+        self._handle_x_button(name, pressed)
 
+    def _handle_x_button(self, name: str, pressed: bool) -> None:
         with self._lock:
             if self._capture_mode:
                 if pressed:
