@@ -8,13 +8,17 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
 DTYPE = "float32"
+
+# Soft-scaling multiplier applied to per-block RMS to derive a 0..1 loudness
+# level for the overlay's live waveform. Tuneable.
+_LEVEL_SCALE = 12.0
 
 
 class Recorder:
@@ -28,6 +32,10 @@ class Recorder:
         self._max_seconds: Optional[int] = None
         self._start_time: Optional[float] = None
         self._auto_stopped = False
+        # Optional callback invoked from the audio thread with a float in
+        # [0, 1] representing the current block's loudness. Set directly
+        # (e.g. `recorder.on_level = fn`) or pass to future constructors.
+        self.on_level: Optional[Callable[[float], None]] = None
 
     @property
     def is_recording(self) -> bool:
@@ -56,6 +64,8 @@ class Recorder:
         self._start_time = time.monotonic()
 
         def _callback(indata, frames, time_info, status):
+            import numpy as np
+
             if status:
                 logger.debug("Recorder stream status: %s", status)
             with self._lock:
@@ -65,6 +75,15 @@ class Recorder:
                 elapsed = time.monotonic() - self._start_time
                 if elapsed >= self._max_seconds:
                     self._auto_stopped = True
+
+            if self.on_level is not None:
+                try:
+                    rms = float(np.sqrt(np.mean(np.square(indata), dtype="float64")))
+                    level = min(1.0, rms * _LEVEL_SCALE)
+                    self.on_level(level)
+                except Exception:
+                    # A slow/broken callback must never break audio capture.
+                    pass
 
         self._stream = sd.InputStream(
             samplerate=SAMPLE_RATE,

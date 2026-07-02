@@ -76,6 +76,7 @@ class App:
         self.cfg = cfg or config_mod.Config.load()
 
         self.recorder = Recorder()
+        self.recorder.on_level = overlay.set_level_threadsafe
         self.transcriber = Transcriber(self.cfg.model)
         self.tray = tray_mod.Tray(
             on_settings=self._open_settings,
