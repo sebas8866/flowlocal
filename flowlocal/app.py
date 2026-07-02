@@ -28,6 +28,7 @@ from flowlocal import config as config_mod
 from flowlocal import sounds
 from flowlocal import cleaner
 from flowlocal import injector
+from flowlocal import overlay
 from flowlocal import tray as tray_mod
 from flowlocal import settings_ui
 from flowlocal import autostart
@@ -109,6 +110,7 @@ class App:
 
         self._tk_root = tk.Tk()
         self._tk_root.withdraw()
+        overlay.start_poller(self._tk_root)
 
         self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker_thread.start()
@@ -166,6 +168,7 @@ class App:
                 "on_clean_llm_change": self._on_clean_llm_change,
                 "on_sounds_change": self._on_sounds_change,
                 "on_autostart_change": self._on_autostart_change,
+                "on_show_overlay_change": self._on_show_overlay_change,
                 "ollama_available": cleaner.ollama_available,
                 "capture_next": self.trigger_manager.capture_next,
                 "cancel_capture": self.trigger_manager.cancel_capture,
@@ -224,6 +227,9 @@ class App:
 
     def _on_sounds_change(self, value: bool) -> None:
         self.cfg.sounds = value
+
+    def _on_show_overlay_change(self, value: bool) -> None:
+        self.cfg.show_overlay = value
 
     def _on_autostart_change(self, value: bool) -> None:
         self.cfg.autostart = value
@@ -334,10 +340,15 @@ class App:
             logger.warning("Injection failed: %s", exc)
             sounds.play_error(self.cfg)
             self.tray.notify("Paste failed — text is on your clipboard")
+            if self.cfg.show_overlay:
+                overlay.show_toast_threadsafe(clean_text)
         except Exception as exc:
             logger.error("Unexpected injection error: %s", exc)
             sounds.play_error(self.cfg)
             self.tray.notify(f"Injection error: {exc}")
+        else:
+            if self.cfg.show_overlay:
+                overlay.show_toast_threadsafe(clean_text)
         finally:
             inject_elapsed = time.monotonic() - inject_start
             logger.info(

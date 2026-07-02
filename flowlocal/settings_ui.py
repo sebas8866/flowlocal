@@ -65,6 +65,7 @@ def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
         on_clean_llm_change(bool)
         on_sounds_change(bool)
         on_autostart_change(bool)
+        on_show_overlay_change(bool)
         ollama_available() -> bool
         capture_next(callback) -> None  # TriggerManager.capture_next
         cancel_capture() -> None
@@ -216,6 +217,12 @@ def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
     )
     row += 1
 
+    show_overlay_var = tk.BooleanVar(value=cfg.show_overlay)
+    ttk.Checkbutton(
+        frame, text="Show text popup after dictation", variable=show_overlay_var
+    ).grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
+    row += 1
+
     # --- Save/Cancel ------------------------------------------------------
     button_frame = ttk.Frame(frame)
     button_frame.grid(row=row, column=0, columnspan=2, sticky="e", pady=(12, 0))
@@ -284,6 +291,13 @@ def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
             cb = deps.get("on_autostart_change")
             if cb:
                 cb(new_autostart)
+
+        new_show_overlay = show_overlay_var.get()
+        if new_show_overlay != cfg.show_overlay:
+            cfg.show_overlay = new_show_overlay
+            cb = deps.get("on_show_overlay_change")
+            if cb:
+                cb(new_show_overlay)
 
         cfg.save()
         _on_close()

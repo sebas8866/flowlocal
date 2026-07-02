@@ -15,7 +15,8 @@ Location: `%APPDATA%\FlowLocal\config.json` — the only persisted interface. Ex
   "filler_words": ["um", "uh", "uhm", "er", "ah", "like", "you know", "i mean", "sort of", "kind of"],
   "autostart": true,
   "sounds": true,
-  "max_record_seconds": 300
+  "max_record_seconds": 300,
+  "show_overlay": true
 }
 ```
 

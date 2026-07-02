@@ -51,6 +51,7 @@ class Config:
     autostart: bool = True
     sounds: bool = True
     max_record_seconds: int = 300
+    show_overlay: bool = True
 
     def _validate(self) -> None:
         """Reset any field holding an invalid value back to its default."""
@@ -95,6 +96,9 @@ class Config:
             self.max_record_seconds, bool
         ) or self.max_record_seconds <= 0:
             self.max_record_seconds = defaults["max_record_seconds"].default
+
+        if not isinstance(self.show_overlay, bool):
+            self.show_overlay = defaults["show_overlay"].default
 
     @classmethod
     def load(cls) -> "Config":
