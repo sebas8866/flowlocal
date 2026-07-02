@@ -32,7 +32,38 @@ _MODEL_PRESETS = [
     ("small", "Light (small, CPU-friendly)"),
 ]
 
+_LANGUAGES = [
+    (None, "auto"),
+    ("en", "English"),
+    ("es", "Spanish"),
+    ("fr", "French"),
+    ("de", "German"),
+    ("pt", "Portuguese"),
+    ("it", "Italian"),
+    ("nl", "Dutch"),
+    ("ja", "Japanese"),
+    ("ko", "Korean"),
+    ("zh", "Chinese"),
+    ("ru", "Russian"),
+    ("hi", "Hindi"),
+    ("ar", "Arabic"),
+]
+
 _current_window = None  # module-level singleton guard
+
+
+def _language_label_to_code(label: str) -> Optional[str]:
+    for code, lbl in _LANGUAGES:
+        if lbl == label:
+            return code
+    return None
+
+
+def _language_code_to_label(code: Optional[str]) -> str:
+    for c, lbl in _LANGUAGES:
+        if c == code:
+            return lbl
+    return _LANGUAGES[0][1]
 
 
 def _model_label_to_value(label: str) -> Optional[str]:
@@ -56,7 +87,8 @@ def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
     `cfg` is the live Config instance.
     `deps` is a dict of callbacks:
         list_devices() -> list[(index, name)]
-        on_mic_change(index_or_none)
+        refresh_devices() -> None  # Recorder.refresh_devices
+        on_mic_change(index_or_none, name_or_none)
         on_trigger_change(binding_str)
         on_mode_change(mode_str)
         on_model_change(model_name)
@@ -99,6 +131,13 @@ def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
 
     win.protocol("WM_DELETE_WINDOW", _on_close)
 
+    refresh_devices = deps.get("refresh_devices")
+    if refresh_devices:
+        try:
+            refresh_devices()
+        except Exception:
+            pass
+
     frame = ttk.Frame(win, padding=12)
     frame.grid(row=0, column=0, sticky="nsew")
 
@@ -113,16 +152,43 @@ def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
 
     mic_var = tk.StringVar()
     current_name = "System default"
-    if cfg.mic_device is not None:
+    if cfg.mic_device_name:
+        for _idx, name in devices:
+            if name == cfg.mic_device_name:
+                current_name = name
+                break
+    if current_name == "System default" and cfg.mic_device is not None:
         for idx, name in devices:
             if idx == cfg.mic_device:
                 current_name = name
                 break
     mic_var.set(current_name)
+
+    mic_row_frame = ttk.Frame(frame)
+    mic_row_frame.grid(row=row, column=1, sticky="ew", pady=4)
     mic_combo = ttk.Combobox(
-        frame, textvariable=mic_var, values=mic_values, state="readonly", width=32
+        mic_row_frame, textvariable=mic_var, values=mic_values, state="readonly", width=28
     )
-    mic_combo.grid(row=row, column=1, sticky="ew", pady=4)
+    mic_combo.pack(side="left", fill="x", expand=True)
+
+    def _on_refresh_devices() -> None:
+        nonlocal devices, mic_values, mic_index_by_name
+        refresh_devices = deps.get("refresh_devices")
+        if refresh_devices:
+            try:
+                refresh_devices()
+            except Exception:
+                pass
+        list_devices = deps.get("list_devices")
+        devices = list_devices() if list_devices else []
+        mic_values = ["System default"] + [name for _idx, name in devices]
+        mic_index_by_name = {name: idx for idx, name in devices}
+        mic_combo.config(values=mic_values)
+        if mic_var.get() not in mic_values:
+            mic_var.set("System default")
+
+    refresh_btn = ttk.Button(mic_row_frame, text="↻", width=3, command=_on_refresh_devices)
+    refresh_btn.pack(side="left", padx=(4, 0))
     row += 1
 
     # --- Trigger --------------------------------------------------------
@@ -180,12 +246,16 @@ def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
     row += 1
 
     # --- Language -----------------------------------------------------
-    ttk.Label(frame, text="Language (blank=auto):").grid(
-        row=row, column=0, sticky="w", pady=4
+    ttk.Label(frame, text="Language:").grid(row=row, column=0, sticky="w", pady=4)
+    language_var = tk.StringVar(value=_language_code_to_label(cfg.language))
+    language_combo = ttk.Combobox(
+        frame,
+        textvariable=language_var,
+        values=[lbl for _code, lbl in _LANGUAGES],
+        state="readonly",
+        width=32,
     )
-    language_var = tk.StringVar(value=cfg.language or "")
-    language_entry = ttk.Entry(frame, textvariable=language_var, width=34)
-    language_entry.grid(row=row, column=1, sticky="ew", pady=4)
+    language_combo.grid(row=row, column=1, sticky="ew", pady=4)
     row += 1
 
     # --- Checkboxes -----------------------------------------------------
@@ -228,13 +298,16 @@ def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
     button_frame.grid(row=row, column=0, columnspan=2, sticky="e", pady=(12, 0))
 
     def _on_save() -> None:
-        mic_name = mic_var.get()
-        mic_index = mic_index_by_name.get(mic_name) if mic_name != "System default" else None
-        if mic_index != cfg.mic_device:
+        mic_name_selected = mic_var.get()
+        is_default = mic_name_selected == "System default"
+        mic_index = mic_index_by_name.get(mic_name_selected) if not is_default else None
+        mic_name = None if is_default else mic_name_selected
+        if mic_index != cfg.mic_device or mic_name != cfg.mic_device_name:
             cfg.mic_device = mic_index
+            cfg.mic_device_name = mic_name
             cb = deps.get("on_mic_change")
             if cb:
-                cb(mic_index)
+                cb(mic_index, mic_name)
 
         new_trigger = trigger_var.get()
         if new_trigger != cfg.trigger:
@@ -257,7 +330,7 @@ def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
             if cb:
                 cb(new_model)
 
-        new_language = language_var.get().strip() or None
+        new_language = _language_label_to_code(language_var.get())
         if new_language != cfg.language:
             cfg.language = new_language
             cb = deps.get("on_language_change")

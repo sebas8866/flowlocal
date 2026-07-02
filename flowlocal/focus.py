@@ -14,6 +14,7 @@ a safe fallback.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -24,21 +25,24 @@ _UIA_IS_VALUE_PATTERN_AVAILABLE = 30043
 _UIA_IS_TEXT_PATTERN_AVAILABLE = 30038
 _UIA_VALUE_IS_READONLY = 30046
 
-_uia_instance = None  # cached per-thread IUIAutomation COM object
-_uia_init_failed = False
+# COM objects are apartment-threaded; a CUIAutomation instance created on
+# one thread must not be used from another. Cache per-thread instead of
+# globally so e.g. a warmup thread's object is never handed to the worker
+# thread.
+_uia_local = threading.local()
 _logged_uia_failure = False
 _logged_fallback_failure = False
 
 
 def _get_uia():
-    """Return a cached IUIAutomation COM instance, creating it on first
-    call. Returns None if UI Automation is unavailable.
+    """Return this thread's cached IUIAutomation COM instance, creating it
+    on first call from this thread. Returns None if UI Automation is
+    unavailable.
     """
-    global _uia_instance, _uia_init_failed
-
-    if _uia_instance is not None:
-        return _uia_instance
-    if _uia_init_failed:
+    instance = getattr(_uia_local, "instance", None)
+    if instance is not None:
+        return instance
+    if getattr(_uia_local, "init_failed", False):
         return None
 
     try:
@@ -51,20 +55,41 @@ def _get_uia():
             comtypes.client.GetModule("UIAutomationCore.dll")
             from comtypes.gen.UIAutomationClient import CUIAutomation, IUIAutomation
     except Exception as exc:
-        _uia_init_failed = True
+        _uia_local.init_failed = True
         _log_uia_failure(exc)
         return None
 
     try:
-        _uia_instance = comtypes.client.CreateObject(
+        instance = comtypes.client.CreateObject(
             CUIAutomation, interface=IUIAutomation
         )
+        _uia_local.instance = instance
     except Exception as exc:
-        _uia_init_failed = True
+        _uia_local.init_failed = True
         _log_uia_failure(exc)
         return None
 
-    return _uia_instance
+    return instance
+
+
+def prewarm() -> None:
+    """Pay the one-time comtypes codegen cost (~0.5s) for the UIA type
+    library, without creating or caching a COM object on the calling
+    thread. Safe to call from any thread (e.g. an app warmup thread) since
+    COM objects themselves are per-thread and must not be shared across
+    threads; codegen (module generation) is a process-global, thread-safe
+    step. The real IUIAutomation object is created lazily, per-thread, on
+    first real use via _get_uia().
+    """
+    try:
+        import comtypes.client
+
+        try:
+            from comtypes.gen.UIAutomationClient import CUIAutomation, IUIAutomation  # noqa: F401
+        except ImportError:
+            comtypes.client.GetModule("UIAutomationCore.dll")
+    except Exception as exc:
+        logger.debug("UIA prewarm (codegen) failed: %s", exc)
 
 
 def _log_uia_failure(exc: Exception) -> None:

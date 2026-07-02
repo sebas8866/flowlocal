@@ -27,4 +27,4 @@ Guarantees:
 
 # Contract: Ollama cleanup call (optional external interface)
 
-`POST http://127.0.0.1:11434/api/generate` with `{"model": cfg.ollama_model, "prompt": <rewrite prompt + transcript>, "stream": false, "options": {"temperature": 0.2}}` → response `.response` used verbatim as cleaned text. 10 s timeout; any failure ⇒ fall back to stage-1 text. Never called when `clean_llm` is false.
+`POST http://127.0.0.1:11434/api/generate` with `{"model": cfg.ollama_model, "prompt": <rewrite prompt + transcript>, "stream": false, "options": {"temperature": 0.2}}` → response `.response` used verbatim as cleaned text. 30 s timeout; any failure ⇒ fall back to stage-1 text. Never called when `clean_llm` is false.

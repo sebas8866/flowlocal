@@ -88,6 +88,23 @@ class Transcriber:
         self._compute_type = None
         self._forced_cpu = False
         self._lock = threading.Lock()
+        # Set when a reload() call fails to load any candidate; subsequent
+        # transcribe() calls raise immediately instead of silently retrying
+        # an online load.
+        self._reload_failed = False
+        # Optional callback invoked with a human-readable status string
+        # (e.g. "Downloading model '...'", "Model '...' ready (GPU)").
+        # Exception-guarded by the caller; never required.
+        self.on_status = None
+
+    def _notify_status(self, msg: str) -> None:
+        if self.on_status is None:
+            return
+        try:
+            self.on_status(msg)
+        except Exception:
+            # A broken status callback must never break model loading.
+            pass
 
     @property
     def device(self):
@@ -100,13 +117,30 @@ class Transcriber:
         """
         with self._lock:
             self.model_name = model_name
-            self._model = None
+            self._free_model_locked()
             self._device = None
             self._compute_type = None
             self._forced_cpu = False
-            self._ensure_loaded()
+            try:
+                self._ensure_loaded()
+            except Exception as exc:
+                self._reload_failed = True
+                logger.error("Model reload failed for '%s': %s", model_name, exc)
+                raise
+            self._reload_failed = False
 
         self.warmup()
+
+    def _free_model_locked(self) -> None:
+        """Drop the current model reference and force a GC pass so CUDA/CPU
+        memory is released before a replacement model is constructed.
+        Caller must hold self._lock.
+        """
+        if self._model is not None:
+            self._model = None
+            import gc
+
+            gc.collect()
 
     def _resolve_model_id(self):
         alias = _MODEL_ALIASES.get(self.model_name)
@@ -137,6 +171,13 @@ class Transcriber:
                 # revision check); only fall back to a network-enabled load
                 # if the model isn't cached locally yet.
                 for local_files_only in (True, False):
+                    if local_files_only is False:
+                        # The local-cache-only attempt just failed, so this
+                        # load is about to hit the network — likely a
+                        # first-time, one-time download.
+                        self._notify_status(
+                            f"Downloading model '{model_id}' (~1.6 GB, one-time)…"
+                        )
                     try:
                         model = WhisperModel(
                             model_id,
@@ -153,6 +194,10 @@ class Transcriber:
                             "Loaded whisper model '%s' on device=%s compute_type=%s "
                             "local_files_only=%s",
                             model_id, device, compute_type, local_files_only,
+                        )
+                        device_label = "GPU" if device == "cuda" else "CPU"
+                        self._notify_status(
+                            f"Model '{model_id}' ready ({device_label})"
                         )
                         return
                     except Exception as exc:
@@ -213,6 +258,12 @@ class Transcriber:
         audio_seconds = len(audio_np) / 16000.0
 
         with self._lock:
+            if self._reload_failed:
+                raise RuntimeError(
+                    "Transcriber model reload previously failed; restart FlowLocal "
+                    "or select a different model to recover."
+                )
+
             self._ensure_loaded()
 
             beam_size = 1 if self._device == "cpu" else BEAM_SIZE
@@ -236,7 +287,7 @@ class Transcriber:
                     self._device, self._compute_type, exc,
                 )
                 self._forced_cpu = True
-                self._model = None
+                self._free_model_locked()
                 self._ensure_loaded()
                 beam_size = 1
                 segments, _info = self._model.transcribe(

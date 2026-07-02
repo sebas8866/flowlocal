@@ -17,9 +17,19 @@ _CLIPBOARD_RETRY_DELAY_SECONDS = 0.05
 
 
 class InjectionFallback(Exception):
-    """Raised when paste fails; the dictated text is left on the clipboard
-    so the user can paste it manually.
+    """Raised when injection fails.
+
+    `text_on_clipboard` distinguishes the two failure modes so callers can
+    give an honest message:
+    - True: the dictated text is on the clipboard (clipboard set succeeded,
+      only the paste keystroke failed) — the user can paste it manually.
+    - False: we could not even set the clipboard, so the dictated text is
+      NOT available there.
     """
+
+    def __init__(self, message: str, text_on_clipboard: bool) -> None:
+        super().__init__(message)
+        self.text_on_clipboard = text_on_clipboard
 
 
 def _open_clipboard_with_retry():
@@ -56,12 +66,20 @@ def _set_clipboard_text(text: str) -> None:
     win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
 
 
-def _restore_clipboard_later(saved_text) -> None:
+def _restore_clipboard_later(saved_text, text_we_set: str) -> None:
+    """Restore `saved_text` onto the clipboard after a short delay, but
+    only if the clipboard still holds exactly the text we placed there
+    (`text_we_set`). If something else wrote to the clipboard in the
+    meantime, leave it alone rather than clobbering the newer content.
+    """
     def _run():
         time.sleep(_RESTORE_DELAY_SECONDS)
         try:
             _open_clipboard_with_retry()
             try:
+                current = _get_clipboard_text()
+                if current != text_we_set:
+                    return
                 win_clip_module = __import__("win32clipboard")
                 win_clip_module.EmptyClipboard()
                 if saved_text is not None:
@@ -113,14 +131,16 @@ def inject(text: str) -> None:
             win32clipboard.CloseClipboard()
     except Exception as exc:
         logger.error("Failed to set clipboard for injection: %s", exc)
-        raise InjectionFallback(f"Could not set clipboard: {exc}") from exc
+        raise InjectionFallback(
+            f"Could not set clipboard: {exc}", text_on_clipboard=False
+        ) from exc
 
     try:
         _send_paste()
     except Exception as exc:
         logger.error("Failed to send paste keystroke: %s", exc)
         raise InjectionFallback(
-            f"Paste failed, text left on clipboard: {exc}"
+            f"Paste failed, text left on clipboard: {exc}", text_on_clipboard=True
         ) from exc
 
-    _restore_clipboard_later(saved_text)
+    _restore_clipboard_later(saved_text, text)

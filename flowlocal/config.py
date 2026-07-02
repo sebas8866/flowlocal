@@ -42,6 +42,7 @@ class Config:
     trigger: str = "mouse:x2"
     mode: str = "hold"
     mic_device: Optional[int] = None
+    mic_device_name: Optional[str] = None
     model: str = "large-v3-turbo"
     language: Optional[str] = None
     clean_fillers: bool = True
@@ -65,6 +66,9 @@ class Config:
 
         if self.mic_device is not None and not isinstance(self.mic_device, int):
             self.mic_device = None
+
+        if self.mic_device_name is not None and not isinstance(self.mic_device_name, str):
+            self.mic_device_name = None
 
         if self.model not in VALID_MODELS:
             self.model = defaults["model"].default

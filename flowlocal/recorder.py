@@ -36,6 +36,11 @@ class Recorder:
         # [0, 1] representing the current block's loudness. Set directly
         # (e.g. `recorder.on_level = fn`) or pass to future constructors.
         self.on_level: Optional[Callable[[float], None]] = None
+        # Optional callback invoked exactly once from the audio callback
+        # thread when max_record_seconds is hit. Exception-guarded like
+        # on_level so a broken handler never breaks audio capture.
+        self.on_auto_stop: Optional[Callable[[], None]] = None
+        self._auto_stop_fired = False
 
     @property
     def is_recording(self) -> bool:
@@ -46,10 +51,19 @@ class Recorder:
         """True if the last recording was cut short by max_record_seconds."""
         return self._auto_stopped
 
-    def start(self, device_index: Optional[int] = None, max_seconds: Optional[int] = None) -> None:
+    def start(
+        self,
+        device_index: Optional[int] = None,
+        max_seconds: Optional[int] = None,
+        device_name: Optional[str] = None,
+    ) -> None:
         """Open an InputStream and begin accumulating audio blocks.
 
-        `device_index` of None uses the system default input device.
+        Device resolution order: if `device_name` is given, look up the
+        *current* device index by exact name match (device indices can
+        shift across reboots/USB replug, names are stable); fall back to
+        `device_index` if the name isn't found, then to the system default
+        input device (None) if neither resolves.
         """
         import sounddevice as sd
 
@@ -57,9 +71,27 @@ class Recorder:
             logger.warning("Recorder.start called while already recording")
             return
 
+        if device_name:
+            resolved_index = None
+            try:
+                for idx, name in self.list_devices():
+                    if name == device_name:
+                        resolved_index = idx
+                        break
+            except Exception as exc:
+                logger.warning("Could not resolve mic device by name: %s", exc)
+            if resolved_index is not None:
+                device_index = resolved_index
+            else:
+                logger.warning(
+                    "Mic device name %r not found; falling back to stored index/default",
+                    device_name,
+                )
+
         self._blocks = []
         self._recording = True
         self._auto_stopped = False
+        self._auto_stop_fired = False
         self._max_seconds = max_seconds
         self._start_time = time.monotonic()
 
@@ -75,6 +107,14 @@ class Recorder:
                 elapsed = time.monotonic() - self._start_time
                 if elapsed >= self._max_seconds:
                     self._auto_stopped = True
+                    if not self._auto_stop_fired:
+                        self._auto_stop_fired = True
+                        if self.on_auto_stop is not None:
+                            try:
+                                self.on_auto_stop()
+                            except Exception:
+                                # A broken callback must never break audio capture.
+                                pass
 
             if self.on_level is not None:
                 try:
@@ -145,3 +185,21 @@ class Recorder:
                 seen_names.add(name)
                 result.append((index, name))
         return result
+
+    def refresh_devices(self) -> None:
+        """Re-initialize PortAudio so newly plugged-in/removed input
+        devices are picked up without restarting the app. No-op while a
+        recording is in progress (tearing down PortAudio mid-stream would
+        break the active capture).
+        """
+        if self._recording:
+            logger.debug("refresh_devices skipped: recording in progress")
+            return
+
+        import sounddevice as sd
+
+        try:
+            sd._terminate()
+            sd._initialize()
+        except Exception as exc:
+            logger.warning("Failed to refresh audio devices: %s", exc)

@@ -2,8 +2,8 @@
 #
 # - Verifies py -3.11 is available
 # - Creates .venv if missing
-# - Installs requirements.txt + NVIDIA CUDA 12 runtime libs (GPU path)
-# - Smoke-tests faster_whisper CUDA availability (falls back to CPU warning)
+# - Installs requirements.txt (+ requirements-gpu.txt if an NVIDIA GPU is detected)
+# - Smoke-tests CUDA availability via ctranslate2 (no model download)
 # - Pre-downloads the default model (large-v3-turbo, ~1.6GB one-time download)
 # - Enables autostart
 # - Prints an Ollama install suggestion if port 11434 is closed
@@ -14,15 +14,35 @@ $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ProjectRoot
 
 Write-Host "== FlowLocal setup ==" -ForegroundColor Cyan
+Write-Host "This will download ~1.6 GB (Whisper large-v3-turbo model) and, if an NVIDIA GPU is detected, NVIDIA CUDA runtime pip wheels (a few hundred MB more)." -ForegroundColor Cyan
+Write-Host ""
 
 # --- 1. Check py -3.11 -------------------------------------------------
 Write-Host "Checking for Python 3.11 launcher..."
-$pyCheck = & py -3.11 --version 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "ERROR: 'py -3.11' is not available. Install Python 3.11 first." -ForegroundColor Red
+
+$pyCommand = Get-Command py -ErrorAction SilentlyContinue
+if (-not $pyCommand) {
+    Write-Host "ERROR: the 'py' launcher was not found on PATH." -ForegroundColor Red
+    Write-Host "Install Python 3.11 from python.org, then re-run this script." -ForegroundColor Red
     exit 1
 }
-Write-Host "Found: $pyCheck"
+
+$pyOk = $true
+try {
+    $pyVersion = & py -3.11 --version
+    if ($LASTEXITCODE -ne 0) {
+        $pyOk = $false
+    }
+} catch {
+    $pyOk = $false
+}
+
+if (-not $pyOk) {
+    Write-Host "ERROR: Python 3.11 is not available via 'py -3.11'." -ForegroundColor Red
+    Write-Host "Install Python 3.11 from python.org, then re-run this script." -ForegroundColor Red
+    exit 1
+}
+Write-Host "Found: $pyVersion"
 
 # --- 2. Create .venv if missing -----------------------------------------
 $VenvPath = Join-Path $ProjectRoot ".venv"
@@ -50,29 +70,29 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-Write-Host "Installing NVIDIA cuBLAS/cuDNN runtime (GPU path)..."
-& $VenvPython -m pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "WARNING: NVIDIA CUDA runtime packages failed to install; GPU path may be unavailable, will fall back to CPU." -ForegroundColor Yellow
+$HasNvidiaGpu = [bool](Get-Command nvidia-smi -ErrorAction SilentlyContinue)
+if ($HasNvidiaGpu) {
+    Write-Host "NVIDIA GPU detected. Installing CUDA runtime libraries (requirements-gpu.txt)..."
+    & $VenvPython -m pip install -r (Join-Path $ProjectRoot "requirements-gpu.txt")
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "WARNING: NVIDIA CUDA runtime packages failed to install; GPU path may be unavailable, will fall back to CPU." -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "No NVIDIA GPU detected (nvidia-smi not found); skipping CUDA runtime install. FlowLocal will run on CPU." -ForegroundColor Yellow
 }
 
 # --- 4. GPU smoke test ---------------------------------------------------
-Write-Host "Smoke-testing faster-whisper CUDA path..."
+Write-Host "Smoke-testing CUDA availability..."
 $SmokeTest = @"
-import sys
 try:
-    import os, glob
-    for d in glob.glob(os.path.join(os.path.dirname(__file__) if '__file__' in dir() else '.', '*')):
-        pass
-    from faster_whisper import WhisperModel
-    try:
-        m = WhisperModel('small', device='cuda', compute_type='float16')
-        print('CUDA path OK')
-    except Exception as e:
-        print('CUDA path failed (%s); will run on CPU' % e)
+    import ctranslate2
+    count = ctranslate2.get_cuda_device_count()
+    if count > 0:
+        print('CUDA path OK (%d device(s))' % count)
+    else:
+        print('No CUDA device found; will run on CPU')
 except Exception as e:
-    print('faster_whisper import failed: %s' % e)
-    sys.exit(1)
+    print('CUDA check failed (%s); will run on CPU' % e)
 "@
 $SmokeTestPath = Join-Path $env:TEMP "flowlocal_smoke_test.py"
 Set-Content -Path $SmokeTestPath -Value $SmokeTest -Encoding utf8

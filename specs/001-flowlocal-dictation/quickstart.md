@@ -3,7 +3,7 @@
 ## Setup (one time)
 
 ```powershell
-cd C:\Users\sebas\Documents\FlowLocal
+cd flowlocal
 .\setup.ps1          # creates .venv (py -3.11), installs deps, downloads model, smoke-tests GPU, enables autostart
 ```
 

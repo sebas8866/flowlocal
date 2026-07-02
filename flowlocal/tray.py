@@ -20,6 +20,10 @@ _STATE_COLORS = {
     STATE_TRANSCRIBING: (240, 150, 30, 255),  # orange
 }
 
+# Distinct color for the paused state so it's visually unmistakable from
+# idle at a glance.
+_PAUSED_COLOR = (74, 122, 168, 255)  # steel blue #4a7aa8
+
 _ICON_SIZE = 32
 
 
@@ -61,21 +65,33 @@ class Tray:
         self._icons_cache = {
             state: _make_icon_image(color) for state, color in _STATE_COLORS.items()
         }
+        self._icons_cache["paused"] = _make_icon_image(_PAUSED_COLOR)
+
+        from flowlocal import __version__
 
         menu = pystray.Menu(
             pystray.MenuItem("Settings", self._handle_settings),
             pystray.MenuItem(
                 self._pause_label, self._handle_toggle_pause
             ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(f"About FlowLocal {__version__}", None, enabled=False),
+            pystray.MenuItem("Open log folder", self._handle_open_log_folder),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._handle_quit),
         )
 
         self._icon = pystray.Icon(
             "FlowLocal",
-            icon=self._icons_cache[self._state],
+            icon=self._current_icon_image(),
             title="FlowLocal",
             menu=menu,
         )
+
+    def _current_icon_image(self):
+        if self._paused:
+            return self._icons_cache.get("paused", self._icons_cache.get(self._state))
+        return self._icons_cache.get(self._state)
 
     def _pause_label(self, item=None) -> str:
         return "Resume" if self._paused else "Pause"
@@ -89,6 +105,18 @@ class Tray:
         if self._on_toggle_pause:
             self._on_toggle_pause()
         self._refresh_menu()
+        self._refresh_icon()
+
+    def _handle_open_log_folder(self, icon=None, item=None) -> None:
+        try:
+            import os
+
+            from flowlocal.config import config_path
+
+            log_dir = os.path.dirname(config_path())
+            os.startfile(log_dir)
+        except Exception as exc:
+            logger.warning("Failed to open log folder: %s", exc)
 
     def _handle_quit(self, icon=None, item=None) -> None:
         if self._on_quit:
@@ -99,14 +127,21 @@ class Tray:
         if self._icon is not None:
             self._icon.update_menu()
 
+    def _refresh_icon(self) -> None:
+        if self._icon is not None:
+            image = self._current_icon_image()
+            if image is not None:
+                self._icon.icon = image
+
     def set_state(self, state: str) -> None:
         self._state = state
-        if self._icon is not None and state in self._icons_cache:
-            self._icon.icon = self._icons_cache[state]
+        if not self._paused:
+            self._refresh_icon()
 
     def set_paused(self, paused: bool) -> None:
         self._paused = paused
         self._refresh_menu()
+        self._refresh_icon()
 
     def notify(self, message: str, title: str = "FlowLocal") -> None:
         if self._icon is not None:

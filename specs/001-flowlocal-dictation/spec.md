@@ -9,7 +9,7 @@
 
 ### Primary User Story
 
-Sebas works across many apps (browser, editors, chat). At any moment he presses and holds a side button on his mouse, speaks naturally — with filler words, restarts, and self-corrections — releases the button, and within a couple of seconds clean, well-punctuated text appears in whatever text field had focus, as if he had typed it. The app runs silently in the system tray, starts with Windows, never contacts the internet, and never asks for money.
+The user works across many apps (browser, editors, chat). At any moment they press and hold a side button on their mouse, speak naturally — with filler words, restarts, and self-corrections — release the button, and within a couple of seconds clean, well-punctuated text appears in whatever text field had focus, as if they had typed it. The app runs silently in the system tray, starts with Windows, never contacts the internet, and never asks for money.
 
 ### Acceptance Scenarios
 

@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 models/
 *.log
+snap_*.txt
+diag*.txt
+log_snapshot.txt
+boot_trace.txt

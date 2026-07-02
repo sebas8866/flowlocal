@@ -77,7 +77,9 @@ class App:
 
         self.recorder = Recorder()
         self.recorder.on_level = overlay.set_level_threadsafe
+        self.recorder.on_auto_stop = self._on_auto_stop
         self.transcriber = Transcriber(self.cfg.model)
+        self.transcriber.on_status = self._on_transcriber_status
         self.tray = tray_mod.Tray(
             on_settings=self._open_settings,
             on_toggle_pause=self._toggle_pause,
@@ -88,6 +90,7 @@ class App:
             mode=self.cfg.mode,
             on_press=self._on_trigger_press,
             on_release=self._on_trigger_release,
+            on_cancel=self._on_trigger_cancel,
         )
 
         self._paused = False
@@ -132,9 +135,15 @@ class App:
         """
         self.transcriber.warmup()
         cleaner.warmup(self.cfg)
-        # First focus.is_text_input_focused() call pays one-time comtypes
-        # codegen (~0.5s); do it now so dictations never do.
-        focus.is_text_input_focused()
+        # Pay the one-time comtypes codegen cost (~0.5s) now, on this
+        # warmup thread, without creating/caching a COM object here — UIA
+        # COM objects are per-thread and must not be created on this thread
+        # then used from the worker thread. The worker thread lazily
+        # creates its own UIA object on first real dictation.
+        try:
+            focus.prewarm()
+        except Exception:
+            pass
 
     def quit(self) -> None:
         if self._tk_root is not None:
@@ -153,6 +162,10 @@ class App:
             self.tray.stop()
         except Exception:
             pass
+        try:
+            self.recorder.stop()
+        except Exception:
+            pass
         self._work_queue.put(None)
 
     # --- tray callbacks -------------------------------------------------
@@ -164,6 +177,7 @@ class App:
         def _do_open():
             deps = {
                 "list_devices": self._list_devices_safe,
+                "refresh_devices": self._refresh_devices_safe,
                 "on_mic_change": self._on_mic_change,
                 "on_trigger_change": self._on_trigger_change,
                 "on_mode_change": self._on_mode_change,
@@ -194,10 +208,23 @@ class App:
             logger.warning("Could not list input devices: %s", exc)
             return []
 
+    def _refresh_devices_safe(self) -> None:
+        try:
+            self.recorder.refresh_devices()
+        except Exception as exc:
+            logger.warning("Could not refresh input devices: %s", exc)
+
+    def _on_transcriber_status(self, msg: str) -> None:
+        try:
+            self.tray.notify(msg)
+        except Exception:
+            pass
+
     # --- settings live-apply callbacks -----------------------------------
 
-    def _on_mic_change(self, index) -> None:
+    def _on_mic_change(self, index, name=None) -> None:
         self.cfg.mic_device = index
+        self.cfg.mic_device_name = name
 
     def _on_trigger_change(self, binding: str) -> None:
         self.cfg.trigger = binding
@@ -249,22 +276,28 @@ class App:
 
     # --- trigger -> pipeline ---------------------------------------------
 
-    def _on_trigger_press(self) -> None:
+    def _on_trigger_press(self) -> bool:
+        """Attempt to start a recording. Returns True if recording actually
+        started, False if rejected (paused or already busy). Hold mode
+        ignores the return value; toggle mode uses it to decide whether to
+        flip into the "recording" state (see TriggerManager._fire_press).
+        """
         if self._paused:
-            return
+            return False
 
         with self._busy_lock:
             if self._busy:
                 logger.warning("Trigger pressed while pipeline busy; rejecting")
                 sounds.play_error(self.cfg)
                 self.tray.notify("Still processing previous dictation")
-                return
+                return False
             self._busy = True
 
         try:
             self.recorder.start(
                 device_index=self.cfg.mic_device,
                 max_seconds=self.cfg.max_record_seconds,
+                device_name=self.cfg.mic_device_name,
             )
         except Exception as exc:
             logger.error("Failed to start recording: %s", exc)
@@ -272,17 +305,75 @@ class App:
             self.tray.notify(f"Microphone error: {exc}")
             with self._busy_lock:
                 self._busy = False
-            return
+            return False
 
         sounds.play_start(self.cfg)
         self.tray.set_state(tray_mod.STATE_RECORDING)
         overlay.set_state_threadsafe(overlay.STATE_RECORDING)
+        return True
 
     def _on_trigger_release(self) -> None:
+        if not self.recorder.is_recording:
+            # Nothing is actually recording (e.g. this release corresponds
+            # to a press that was rejected, or arrives while a previous
+            # dictation is still transcribing) — no-op rather than firing a
+            # spurious stop cue / state flash / empty work item.
+            return
+
         with self._busy_lock:
             if not self._busy:
                 return
 
+        self._finish_recording()
+
+    def _on_trigger_cancel(self) -> None:
+        """Esc was pressed while a recording was in progress: stop the
+        recorder and discard the captured audio (no enqueue) rather than
+        transcribing it.
+        """
+        if not self.recorder.is_recording:
+            return
+
+        with self._busy_lock:
+            if not self._busy:
+                return
+
+        try:
+            self.recorder.stop()
+        except Exception as exc:
+            logger.warning("Error stopping recorder on cancel: %s", exc)
+
+        sounds.play_error(self.cfg)
+        self.tray.set_state(tray_mod.STATE_IDLE)
+        overlay.set_state_threadsafe(overlay.STATE_IDLE)
+        with self._busy_lock:
+            self._busy = False
+
+    def _on_auto_stop(self) -> None:
+        """Called from the recorder's audio callback (PortAudio) thread
+        exactly once when max_record_seconds is hit. Stopping the stream
+        must not happen synchronously from within its own callback (that
+        can deadlock), so the actual finish work is dispatched onto a
+        short-lived daemon thread; this method itself only does the quick
+        state checks before returning control to the audio callback.
+        """
+        if not self.recorder.is_recording:
+            return
+
+        with self._busy_lock:
+            if not self._busy:
+                return
+
+        def _run():
+            self._finish_recording()
+            self.tray.notify("Max recording length reached — transcribing")
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _finish_recording(self) -> None:
+        """Stop the recorder and hand the captured audio to the worker
+        queue. Shared by a normal trigger release and an auto-stop.
+        """
         try:
             audio = self.recorder.stop()
         except Exception as exc:
@@ -351,7 +442,12 @@ class App:
         except injector.InjectionFallback as exc:
             logger.warning("Injection failed: %s", exc)
             sounds.play_error(self.cfg)
-            self.tray.notify("Paste failed — text is on your clipboard")
+            if exc.text_on_clipboard:
+                self.tray.notify("Paste failed — text is on your clipboard")
+            else:
+                self.tray.notify(
+                    "Injection failed — hover the bottom pill to copy your text"
+                )
             overlay.notify_result_threadsafe(clean_text, landed_in_textbox=False)
         except Exception as exc:
             logger.error("Unexpected injection error: %s", exc)

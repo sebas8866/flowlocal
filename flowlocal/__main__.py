@@ -44,6 +44,18 @@ def main() -> int:
     guard = SingleInstanceGuard()
     if not guard.acquire():
         logger.warning("Another instance is already running; exiting")
+        try:
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                "FlowLocal is already running — look for the pill at the "
+                "bottom of your screen.",
+                "FlowLocal",
+                0x40,
+            )
+        except Exception:
+            pass
         return 1
 
     cfg = Config.load()
