@@ -109,6 +109,30 @@ def _send_paste() -> None:
     time.sleep(0.05)
 
 
+def _send_undo() -> None:
+    from pynput.keyboard import Controller, Key
+
+    kb = Controller()
+    time.sleep(0.05)
+    kb.press(Key.ctrl)
+    time.sleep(0.02)
+    kb.press("z")
+    time.sleep(0.02)
+    kb.release("z")
+    time.sleep(0.02)
+    kb.release(Key.ctrl)
+    time.sleep(0.05)
+
+
+def send_undo() -> None:
+    """Send Ctrl+Z to the focused app, e.g. in response to a "scratch
+    that"/"undo that" voice command. Raises on failure; callers should
+    treat that as non-fatal (log + notify) since there is no clipboard
+    fallback for an undo keystroke.
+    """
+    _send_undo()
+
+
 def inject(text: str) -> None:
     """Save the current clipboard, place `text` on it, send Ctrl+V, then
     restore the original clipboard content after a short delay.

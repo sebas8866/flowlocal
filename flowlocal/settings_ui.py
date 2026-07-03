@@ -121,6 +121,9 @@ def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
         on_groq_api_key_change(key_str)
         on_cloud_stt_model_change(model_str)
         on_cloud_llm_model_change(model_str)
+        on_vocabulary_change(list[str])
+        on_smart_context_change(bool)
+        on_voice_commands_change(bool)
         ollama_available() -> bool
         groq_check(cfg) -> tuple[bool, str]  # flowlocal.cloud.check
         capture_next(callback) -> None  # TriggerManager.capture_next
@@ -399,6 +402,31 @@ def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
     ).grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
     row += 1
 
+    smart_context_var = tk.BooleanVar(value=cfg.smart_context)
+    ttk.Checkbutton(
+        frame, text="App-aware tone matching", variable=smart_context_var
+    ).grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
+    row += 1
+
+    voice_commands_var = tk.BooleanVar(value=cfg.voice_commands)
+    ttk.Checkbutton(
+        frame,
+        text='Voice commands ("new line", "scratch that", …)',
+        variable=voice_commands_var,
+    ).grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
+    row += 1
+
+    # --- Personal dictionary ---------------------------------------------
+    ttk.Label(frame, text="Personal dictionary (one word or phrase per line):").grid(
+        row=row, column=0, columnspan=2, sticky="w", pady=(6, 2)
+    )
+    row += 1
+
+    vocabulary_text = tk.Text(frame, width=40, height=4)
+    vocabulary_text.insert("1.0", "\n".join(cfg.vocabulary))
+    vocabulary_text.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+    row += 1
+
     sounds_var = tk.BooleanVar(value=cfg.sounds)
     ttk.Checkbutton(frame, text="Sounds", variable=sounds_var).grid(
         row=row, column=0, columnspan=2, sticky="w", pady=2
@@ -474,6 +502,31 @@ def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
             cb = deps.get("on_clean_llm_change")
             if cb:
                 cb(new_llm)
+
+        new_smart_context = smart_context_var.get()
+        if new_smart_context != cfg.smart_context:
+            cfg.smart_context = new_smart_context
+            cb = deps.get("on_smart_context_change")
+            if cb:
+                cb(new_smart_context)
+
+        new_voice_commands = voice_commands_var.get()
+        if new_voice_commands != cfg.voice_commands:
+            cfg.voice_commands = new_voice_commands
+            cb = deps.get("on_voice_commands_change")
+            if cb:
+                cb(new_voice_commands)
+
+        new_vocabulary = [
+            line.strip()
+            for line in vocabulary_text.get("1.0", "end").splitlines()
+            if line.strip()
+        ]
+        if new_vocabulary != cfg.vocabulary:
+            cfg.vocabulary = new_vocabulary
+            cb = deps.get("on_vocabulary_change")
+            if cb:
+                cb(new_vocabulary)
 
         new_sounds = sounds_var.get()
         if new_sounds != cfg.sounds:

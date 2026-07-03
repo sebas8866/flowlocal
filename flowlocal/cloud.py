@@ -52,8 +52,11 @@ def _encode_wav(audio, samplerate: int) -> bytes:
     return buf.getvalue()
 
 
-def transcribe(audio, samplerate: int, cfg) -> str:
+def transcribe(audio, samplerate: int, cfg, prompt: str = None) -> str:
     """POST audio to Groq's Whisper endpoint; return the transcript text.
+
+    `prompt`, when given, is forwarded as the Groq transcription endpoint's
+    `prompt` form field (recent-dictation continuity / vocabulary bias).
 
     Raises CloudError on any failure. Callers should fall back to the local
     transcriber.
@@ -71,6 +74,8 @@ def transcribe(audio, samplerate: int, cfg) -> str:
     data = {"model": model, "response_format": "text"}
     if language:
         data["language"] = language
+    if prompt:
+        data["prompt"] = prompt
 
     try:
         import requests
@@ -95,9 +100,9 @@ def transcribe(audio, samplerate: int, cfg) -> str:
     return text
 
 
-def clean(text: str, cfg) -> str:
+def clean(text: str, cfg, app_context=None, previous=None) -> str:
     """POST the transcript to Groq's chat completions endpoint for a
-    grammar/false-start rewrite, reusing cleaner.REWRITE_PROMPT and
+    grammar/false-start rewrite, reusing cleaner.build_rewrite_prompt and
     cleaner.sanity_check so both LLM paths share the same prompt and output
     guard. Raises CloudError on any failure or implausible output.
     """
@@ -106,7 +111,7 @@ def clean(text: str, cfg) -> str:
     key = _require_key(cfg)
 
     model = getattr(cfg, "cloud_llm_model", "llama-3.3-70b-versatile") or "llama-3.3-70b-versatile"
-    prompt = cleaner.REWRITE_PROMPT.format(text=text)
+    prompt = cleaner.build_rewrite_prompt(text, cfg, app_context=app_context, previous=previous)
 
     payload = {
         "model": model,

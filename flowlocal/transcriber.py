@@ -251,9 +251,10 @@ class Transcriber:
 
         logger.info("Transcriber warmup completed in %.2fs", time.monotonic() - start)
 
-    def transcribe(self, audio_np, language: str = None) -> str:
+    def transcribe(self, audio_np, language: str = None, initial_prompt: str = None) -> str:
         """Transcribe a mono 16kHz float32 numpy array. Returns "" for
-        empty/silent audio.
+        empty/silent audio. `initial_prompt`, when given, biases decoding
+        toward vocabulary/context (faster-whisper's `initial_prompt`).
         """
         import numpy as np
 
@@ -284,6 +285,7 @@ class Transcriber:
                     vad_filter=True,
                     beam_size=beam_size,
                     condition_on_previous_text=False,
+                    initial_prompt=initial_prompt,
                 )
                 texts = [seg.text.strip() for seg in segments]
                 result = " ".join(t for t in texts if t).strip()
@@ -305,6 +307,7 @@ class Transcriber:
                     vad_filter=True,
                     beam_size=beam_size,
                     condition_on_previous_text=False,
+                    initial_prompt=initial_prompt,
                 )
                 texts = [seg.text.strip() for seg in segments]
                 result = " ".join(t for t in texts if t).strip()

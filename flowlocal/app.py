@@ -28,6 +28,7 @@ from flowlocal import config as config_mod
 from flowlocal import sounds
 from flowlocal import cleaner
 from flowlocal import cloud as cloud_mod
+from flowlocal import context as context_mod
 from flowlocal import focus
 from flowlocal import injector
 from flowlocal import overlay
@@ -41,6 +42,15 @@ from flowlocal.transcriber import Transcriber
 logger = logging.getLogger(__name__)
 
 _MUTEX_NAME = "Global\\FlowLocal_SingleInstance"
+
+# Recent-dictation continuity window: a previous dictation's tail is only
+# offered as context (prompt "previous" + Whisper initial_prompt bias, and
+# eligibility for the undo voice command) when it landed less than this many
+# seconds ago.
+_CONTINUITY_WINDOW_SECONDS = 120.0
+_PREVIOUS_CONTEXT_CHARS = 200
+_PREVIOUS_INITIAL_PROMPT_CHARS = 100
+_VOCABULARY_PROMPT_MAX_CHARS = 200
 
 
 class SingleInstanceGuard:
@@ -100,6 +110,14 @@ class App:
         self._work_queue: "queue.Queue" = queue.Queue()
         self._worker_thread: Optional[threading.Thread] = None
         self._running = False
+
+        # Recent-dictation continuity (feature 4) + app-aware context
+        # (feature 3) state. `_pending_app_context` is captured once at
+        # trigger press (before the user can alt-tab away) and carried
+        # through the queue item to `_process`/`_clean`.
+        self._last_injected_text: Optional[str] = None
+        self._last_injected_at: Optional[float] = None
+        self._pending_app_context: Optional[str] = None
 
         self._tk_root = None
 
@@ -199,6 +217,9 @@ class App:
                 "on_groq_api_key_change": self._on_groq_api_key_change,
                 "on_cloud_stt_model_change": self._on_cloud_stt_model_change,
                 "on_cloud_llm_model_change": self._on_cloud_llm_model_change,
+                "on_vocabulary_change": self._on_vocabulary_change,
+                "on_smart_context_change": self._on_smart_context_change,
+                "on_voice_commands_change": self._on_voice_commands_change,
                 "ollama_available": cleaner.ollama_available,
                 "groq_check": cloud_mod.check,
                 "capture_next": self.trigger_manager.capture_next,
@@ -305,6 +326,15 @@ class App:
     def _on_cloud_llm_model_change(self, value: str) -> None:
         self.cfg.cloud_llm_model = value
 
+    def _on_vocabulary_change(self, value: list) -> None:
+        self.cfg.vocabulary = value
+
+    def _on_smart_context_change(self, value: bool) -> None:
+        self.cfg.smart_context = value
+
+    def _on_voice_commands_change(self, value: bool) -> None:
+        self.cfg.voice_commands = value
+
     def _on_autostart_change(self, value: bool) -> None:
         self.cfg.autostart = value
         try:
@@ -333,6 +363,16 @@ class App:
                 self.tray.notify("Still processing previous dictation")
                 return False
             self._busy = True
+
+        # Capture the foreground app NOW, before the user can alt-tab
+        # elsewhere while speaking. None on any failure or when disabled.
+        self._pending_app_context = None
+        if getattr(self.cfg, "smart_context", True):
+            try:
+                self._pending_app_context = context_mod.get_app_context()
+            except Exception as exc:
+                logger.debug("Failed to capture app context: %s", exc)
+                self._pending_app_context = None
 
         try:
             self.recorder.start(
@@ -430,7 +470,10 @@ class App:
         sounds.play_stop(self.cfg)
         self.tray.set_state(tray_mod.STATE_TRANSCRIBING)
         overlay.set_state_threadsafe(overlay.STATE_TRANSCRIBING)
-        self._work_queue.put(audio)
+        # Carry the app context captured at trigger-press time through the
+        # queue alongside the audio (a plain dict, not the None sentinel
+        # used for shutdown).
+        self._work_queue.put({"audio": audio, "app_context": self._pending_app_context})
 
     # --- worker thread ----------------------------------------------------
 
@@ -440,7 +483,7 @@ class App:
             if item is None:
                 return
             try:
-                self._process(item)
+                self._process(item["audio"], item.get("app_context"))
             except Exception:
                 logger.error("Unhandled pipeline error:\n%s", traceback.format_exc())
                 sounds.play_error(self.cfg)
@@ -451,7 +494,40 @@ class App:
                 with self._busy_lock:
                     self._busy = False
 
-    def _clean(self, raw_text: str) -> str:
+    def _recent_previous_text(self) -> Optional[str]:
+        """Return the tail of the last successfully injected dictation if it
+        landed less than _CONTINUITY_WINDOW_SECONDS ago, else None.
+        """
+        import time
+
+        if self._last_injected_text is None or self._last_injected_at is None:
+            return None
+        if time.monotonic() - self._last_injected_at >= _CONTINUITY_WINDOW_SECONDS:
+            return None
+        return self._last_injected_text
+
+    def _build_initial_prompt(self, previous_text: Optional[str]) -> Optional[str]:
+        """Build the Whisper initial_prompt: glossary (from cfg.vocabulary,
+        capped) plus a trimmed tail of the previous dictation for
+        continuity. Returns None when there is nothing to bias with.
+        """
+        parts = []
+
+        vocabulary = getattr(self.cfg, "vocabulary", None)
+        if vocabulary:
+            glossary = "Glossary: " + ", ".join(vocabulary) + "."
+            if len(glossary) > _VOCABULARY_PROMPT_MAX_CHARS:
+                glossary = glossary[:_VOCABULARY_PROMPT_MAX_CHARS]
+            parts.append(glossary)
+
+        if previous_text:
+            parts.append(previous_text[-_PREVIOUS_INITIAL_PROMPT_CHARS:])
+
+        if not parts:
+            return None
+        return " ".join(parts)
+
+    def _clean(self, raw_text: str, app_context=None, previous=None) -> str:
         """Stage-1 rules always run locally. Stage-2 LLM rewrite (when
         cfg.clean_llm) goes to Groq on the cloud backend or Ollama on the
         local backend. A cloud stage-2 failure keeps the stage-1 text
@@ -464,27 +540,32 @@ class App:
 
         if self.cfg.backend == "cloud":
             try:
-                return cloud_mod.clean(raw_text, self.cfg)
+                return cloud_mod.clean(raw_text, self.cfg, app_context=app_context, previous=previous)
             except cloud_mod.CloudError as exc:
                 logger.warning("Cloud cleanup failed, keeping stage-1 text: %s", exc)
                 return stage1_result
 
-        return cleaner.clean(raw_text, self.cfg)
+        return cleaner.clean(raw_text, self.cfg, app_context=app_context, previous=previous)
 
-    def _process(self, audio) -> None:
+    def _process(self, audio, app_context=None) -> None:
         import time
 
         audio_seconds = len(audio) / 16000.0 if audio is not None else 0.0
 
+        previous_text = self._recent_previous_text()
+        initial_prompt = self._build_initial_prompt(previous_text)
+
         stt_start = time.monotonic()
         if self.cfg.backend == "cloud":
             try:
-                raw_text = cloud_mod.transcribe(audio, 16000, self.cfg)
+                raw_text = cloud_mod.transcribe(audio, 16000, self.cfg, prompt=initial_prompt)
             except cloud_mod.CloudError as exc:
                 logger.warning("Cloud transcription failed (%s); falling back to local", exc)
                 self.tray.notify(f"Cloud transcription failed ({exc}) — using local model")
                 try:
-                    raw_text = self.transcriber.transcribe(audio, language=self.cfg.language)
+                    raw_text = self.transcriber.transcribe(
+                        audio, language=self.cfg.language, initial_prompt=initial_prompt
+                    )
                 except Exception as exc2:
                     logger.error("Local fallback transcription failed: %s", exc2)
                     sounds.play_error(self.cfg)
@@ -492,7 +573,9 @@ class App:
                     return
         else:
             try:
-                raw_text = self.transcriber.transcribe(audio, language=self.cfg.language)
+                raw_text = self.transcriber.transcribe(
+                    audio, language=self.cfg.language, initial_prompt=initial_prompt
+                )
             except Exception as exc:
                 logger.error("Transcription failed: %s", exc)
                 sounds.play_error(self.cfg)
@@ -503,8 +586,31 @@ class App:
         if not raw_text:
             return  # silence/empty: skip silently
 
+        if cleaner.is_hallucination(raw_text):
+            logger.info("Discarding likely Whisper hallucination: %r", raw_text)
+            return  # treat as empty, same as the silence path
+
+        # Voice command: whole-utterance undo ("scratch that", etc.), only
+        # honored when a previous injection happened recently.
+        if getattr(self.cfg, "voice_commands", True) and cleaner.is_undo_command(raw_text):
+            if (
+                self._last_injected_at is not None
+                and time.monotonic() - self._last_injected_at < _CONTINUITY_WINDOW_SECONDS
+            ):
+                try:
+                    injector.send_undo()
+                    self.tray.notify("Undone")
+                except Exception as exc:
+                    logger.warning("Undo injection failed: %s", exc)
+                    sounds.play_error(self.cfg)
+                self._last_injected_text = None
+                self._last_injected_at = None
+            else:
+                logger.info("Ignoring undo command; no recent injection")
+            return
+
         clean_start = time.monotonic()
-        clean_text = self._clean(raw_text)
+        clean_text = self._clean(raw_text, app_context=app_context, previous=previous_text)
         clean_elapsed = time.monotonic() - clean_start
         if not clean_text:
             return
@@ -529,6 +635,8 @@ class App:
             sounds.play_error(self.cfg)
             self.tray.notify(f"Injection error: {exc}")
         else:
+            self._last_injected_text = clean_text[-_PREVIOUS_CONTEXT_CHARS:]
+            self._last_injected_at = time.monotonic()
             overlay.notify_result_threadsafe(
                 clean_text, landed_in_textbox=text_input_focused
             )

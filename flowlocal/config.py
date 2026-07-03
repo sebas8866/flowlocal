@@ -58,6 +58,9 @@ class Config:
     groq_api_key: str = ""
     cloud_stt_model: str = "whisper-large-v3-turbo"
     cloud_llm_model: str = "llama-3.3-70b-versatile"
+    vocabulary: list = field(default_factory=list)
+    smart_context: bool = True
+    voice_commands: bool = True
 
     def _validate(self) -> None:
         """Reset any field holding an invalid value back to its default."""
@@ -120,6 +123,17 @@ class Config:
 
         if not isinstance(self.cloud_llm_model, str) or not self.cloud_llm_model:
             self.cloud_llm_model = defaults["cloud_llm_model"].default
+
+        if not isinstance(self.vocabulary, list) or not all(
+            isinstance(w, str) and w.strip() for w in self.vocabulary
+        ):
+            self.vocabulary = []
+
+        if not isinstance(self.smart_context, bool):
+            self.smart_context = defaults["smart_context"].default
+
+        if not isinstance(self.voice_commands, bool):
+            self.voice_commands = defaults["voice_commands"].default
 
     @classmethod
     def load(cls) -> "Config":

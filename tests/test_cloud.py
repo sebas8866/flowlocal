@@ -171,6 +171,48 @@ class TestTranscribe(unittest.TestCase):
 
         self.assertNotIn("language", captured["data"])
 
+    def test_forwards_prompt_field_when_given(self):
+        import numpy as np
+
+        cfg = FakeConfig(groq_api_key="secret-key")
+        audio = np.zeros(16000, dtype="float32")
+
+        captured = {}
+
+        def fake_post(url, headers=None, data=None, files=None, timeout=None):
+            captured["data"] = data
+            return FakeResponse(status_code=200, text="ok")
+
+        orig_post = requests.post
+        requests.post = fake_post
+        try:
+            cloud.transcribe(audio, 16000, cfg, prompt="Glossary: Aarav.")
+        finally:
+            requests.post = orig_post
+
+        self.assertEqual(captured["data"]["prompt"], "Glossary: Aarav.")
+
+    def test_omits_prompt_field_when_not_given(self):
+        import numpy as np
+
+        cfg = FakeConfig(groq_api_key="secret-key")
+        audio = np.zeros(16000, dtype="float32")
+
+        captured = {}
+
+        def fake_post(url, headers=None, data=None, files=None, timeout=None):
+            captured["data"] = data
+            return FakeResponse(status_code=200, text="ok")
+
+        orig_post = requests.post
+        requests.post = fake_post
+        try:
+            cloud.transcribe(audio, 16000, cfg)
+        finally:
+            requests.post = orig_post
+
+        self.assertNotIn("prompt", captured["data"])
+
     def test_non_200_raises_cloud_error(self):
         import numpy as np
 
@@ -269,6 +311,34 @@ class TestClean(unittest.TestCase):
                 cloud.clean("some text", cfg)
         finally:
             requests.post = orig_post
+
+    def test_forwards_app_context_and_previous_into_prompt(self):
+        cfg = FakeConfig(groq_api_key="secret-key")
+
+        captured = {}
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            captured["json"] = json
+            return FakeResponse(
+                status_code=200,
+                json_data={"choices": [{"message": {"content": "Cleaned text here."}}]},
+            )
+
+        orig_post = requests.post
+        requests.post = fake_post
+        try:
+            cloud.clean(
+                "some dictated text",
+                cfg,
+                app_context="Discord.exe — #general",
+                previous="earlier dictation tail",
+            )
+        finally:
+            requests.post = orig_post
+
+        content = captured["json"]["messages"][0]["content"]
+        self.assertIn("Discord.exe", content)
+        self.assertIn("earlier dictation tail", content)
 
     def test_sanity_check_failure_raises_cloud_error(self):
         cfg = FakeConfig(groq_api_key="secret-key")

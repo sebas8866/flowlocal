@@ -10,6 +10,15 @@ Hold a key or your mouse's side button, speak, release — clean, punctuated tex
 - Runs quietly in the **system tray**, with a Wispr-style waveform pill at the bottom of the screen
 - Auto-starts with Windows
 
+## Why it beats Wispr Flow
+
+- **Personal dictionary** — teach it names, product terms, and jargon once (Settings → Personal dictionary); they bias both speech recognition and the cleanup rewrite so they stop getting mangled.
+- **App-aware tone** — FlowLocal notices what app you're dictating into (Discord vs. Outlook vs. a code editor) and nudges the cleanup rewrite to match that app's natural style, without changing what you said.
+- **Continuity across dictations** — if you speak again within two minutes of your last dictation, FlowLocal quietly carries the tail of that previous text forward as context, so follow-up thoughts land coherently instead of being cleaned up in isolation.
+- **Voice commands** — say "new line" or "new paragraph" mid-dictation to insert real line breaks, or "scratch that" / "undo that" right after a dictation to undo it (Ctrl+Z) instead of manually deleting.
+- **Hallucination guards** — classic Whisper silence artifacts ("thank you for watching", "subtitles by the Amara.org community", etc.) are detected and silently discarded instead of getting pasted into your document.
+- **Rewrite prompt tuned for dictation, not summarization** — the stage-2 LLM rewrite is instructed to preserve every detail and your own word choice, collapsing only false starts/self-corrections and filler — never paraphrasing or shortening what you said.
+
 ## Requirements
 
 - Windows 10 or 11
@@ -71,6 +80,9 @@ Settings persist to `%APPDATA%\FlowLocal\config.json`. Most fields are editable 
 | `groq_api_key` | str | `""` | your Groq API key (only used when `backend` is `cloud`) |
 | `cloud_stt_model` | str | `"whisper-large-v3-turbo"` | Groq speech-to-text model |
 | `cloud_llm_model` | str | `"llama-3.3-70b-versatile"` | Groq chat model used for cleanup rewrite |
+| `vocabulary` | list[str] | `[]` | personal dictionary — names/terms biased in both STT and cleanup |
+| `smart_context` | bool | `true` | capture the foreground app + window title and pass it to the cleanup rewrite for tone-matching |
+| `voice_commands` | bool | `true` | enables "new line"/"new paragraph" and the "scratch that"/"undo that" undo command |
 
 Default `filler_words`: `um, uh, uhm, er, ah, like, you know, i mean, sort of, kind of` — edit the list in `config.json` or Settings to add/remove words.
 
