@@ -392,5 +392,18 @@ class TestTranscriberInitialPromptForwarding(unittest.TestCase):
         self.assertEqual(captured.get("condition_on_previous_text"), False)
 
 
+class UndoHallucinationPhraseDisjointnessTest(unittest.TestCase):
+    """FIX 6b: app._process now checks is_undo_command() before
+    is_hallucination(), so an utterance must never be able to match both
+    phrase sets — otherwise ordering would silently decide the outcome
+    instead of the phrase sets being unambiguous by construction.
+    """
+
+    def test_undo_and_hallucination_phrases_are_disjoint(self):
+        from flowlocal.cleaner import _HALLUCINATION_PHRASES, _UNDO_PHRASES
+
+        self.assertEqual(_UNDO_PHRASES & _HALLUCINATION_PHRASES, set())
+
+
 if __name__ == "__main__":
     unittest.main()

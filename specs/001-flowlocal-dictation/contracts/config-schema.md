@@ -7,6 +7,7 @@ Location: `%APPDATA%\FlowLocal\config.json` — the only persisted interface. Ex
   "trigger": "mouse:x2",
   "mode": "hold",
   "mic_device": null,
+  "mic_device_name": null,
   "model": "large-v3-turbo",
   "language": null,
   "clean_fillers": true,
@@ -34,6 +35,7 @@ Guarantees:
 - Hand-edits are picked up on next app start (settings UI edits apply immediately).
 - `trigger` grammar: `mouse:x1 | mouse:x2 | key:<key>[+<key>...]` where keys use pynput canonical names (e.g. `key:ctrl_l+space`, `key:f9`).
 - `vocabulary`: list of non-empty strings (personal dictionary); any other shape reverts the whole list to `[]`. Used both as Whisper `initial_prompt` bias and in the stage-2 rewrite prompt.
+- `mic_device_name`: preferred microphone by name (survives PortAudio device-index reshuffles across reboots/replugs); resolved to an index at recording-start time, falling back to `mic_device`/default if the named device isn't currently present.
 - `smart_context`: when `true`, the foreground app + window title is captured at trigger-press time and passed to the stage-2 rewrite prompt so tone can match the target app. `false` disables capture entirely.
 - `voice_commands`: when `true`, enables the "new line"/"new paragraph" stage-1 rule and the "scratch that"/"delete that"/"undo that"/"undo last" whole-utterance undo command.
 - `theme`: one of `light | dark | system`; controls the CustomTkinter appearance mode of the app window. Invalid values revert to `"light"`.

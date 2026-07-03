@@ -103,15 +103,20 @@ def _send_paste() -> None:
     from pynput.keyboard import Controller, Key
 
     kb = Controller()
-    time.sleep(0.05)
+    # No leading sleep: the clipboard is already set synchronously by the
+    # caller before this runs, so there's nothing to wait on here.
     kb.press(Key.ctrl)
-    time.sleep(0.02)
+    # Inter-key delays are kept (not removed) because some Electron-based
+    # apps (Slack, Discord, VS Code, etc.) drop synthetic key events sent
+    # as too-fast a chord — a few ms of spacing makes the Ctrl+V land
+    # reliably in those apps.
+    time.sleep(0.015)
     kb.press("v")
-    time.sleep(0.02)
+    time.sleep(0.015)
     kb.release("v")
-    time.sleep(0.02)
+    time.sleep(0.015)
     kb.release(Key.ctrl)
-    time.sleep(0.05)
+    time.sleep(0.02)
 
 
 def _send_undo() -> None:

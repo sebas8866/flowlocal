@@ -7,11 +7,22 @@ THREADING MODEL (see also flowlocal/ui/window.py docstring):
 - The tray icon (pystray) runs detached on its own background thread via
   `Tray.run_detached()`.
 - pynput's keyboard/mouse listeners run on their own daemon threads
-  (managed internally by TriggerManager).
+  (managed internally by TriggerManager). For suppressed bindings (default
+  mouse:x2, single keys), pynput's win32_event_filter calls
+  App._on_trigger_press/_on_trigger_release SYNCHRONOUSLY inside the
+  Windows low-level hook callback. Windows enforces a ~300ms budget on
+  that callback (LowLevelHooksTimeout) — blow through it and the OS
+  silently removes the hook, permanently killing the trigger until
+  restart. So _on_trigger_press/_on_trigger_release/_on_trigger_cancel do
+  ONLY cheap, synchronous state-machine work (see flowlocal/session_state.py)
+  and immediately hand off anything slow — get_app_context() (cross-process
+  win32), recorder.start()/stop() (PortAudio stream open/close, tens to
+  hundreds of ms), sound cues, tray/overlay updates — to a short-lived
+  daemon thread.
 - The dictation pipeline (record -> transcribe -> clean -> inject) runs on
   a single dedicated worker thread with a queue of depth 1: a trigger
-  press while the worker is busy is rejected (error cue) rather than
-  queued, so dictations never interleave.
+  press while a recording/transcription is already in progress is rejected
+  (error cue) rather than queued, so dictations never interleave.
 - Any callback that needs to touch tkinter widgets (e.g. opening Settings
   from the tray menu, which fires on the tray's thread) is marshalled onto
   the main thread via `root.after(0, ...)`.
@@ -38,6 +49,7 @@ from flowlocal import ui as app_ui
 from flowlocal import autostart
 from flowlocal import hotkey as hotkey_mod
 from flowlocal.recorder import Recorder
+from flowlocal.session_state import SessionState
 from flowlocal.transcriber import Transcriber
 
 logger = logging.getLogger(__name__)
@@ -52,6 +64,12 @@ _CONTINUITY_WINDOW_SECONDS = 120.0
 _PREVIOUS_CONTEXT_CHARS = 200
 _PREVIOUS_INITIAL_PROMPT_CHARS = 100
 _VOCABULARY_PROMPT_MAX_CHARS = 200
+# Cap on the previous-dictation tail forwarded into the stage-2 cleanup
+# prompt (via _clean -> build_rewrite_prompt). Explicit and independent of
+# _PREVIOUS_CONTEXT_CHARS (the storage cap applied when _last_injected_text
+# is set) so the cleanup-prompt budget doesn't implicitly ride on that
+# unrelated cap.
+_PREVIOUS_CLEANUP_PROMPT_CHARS = 200
 
 
 class SingleInstanceGuard:
@@ -107,8 +125,7 @@ class App:
         )
 
         self._paused = False
-        self._busy_lock = threading.Lock()
-        self._busy = False
+        self._session = SessionState()
         self._work_queue: "queue.Queue" = queue.Queue()
         self._worker_thread: Optional[threading.Thread] = None
         self._running = False
@@ -378,33 +395,56 @@ class App:
             logger.error("Failed to update autostart: %s", exc)
 
     # --- trigger -> pipeline ---------------------------------------------
+    #
+    # _on_trigger_press/_on_trigger_release/_on_trigger_cancel run
+    # SYNCHRONOUSLY on the Windows low-level hook thread for suppressed
+    # bindings (see module docstring) and must return in well under the
+    # ~300ms LowLevelHooksTimeout. They therefore only touch
+    # `self._session` (a lock-guarded pure state machine, see
+    # flowlocal/session_state.py) and spawn daemon threads for everything
+    # else. `_session.claim_finish()`/`.press()` are the single source of
+    # truth for "who gets to stop/start the recorder" — release, Esc-cancel,
+    # and auto-stop race each other through the same atomic claim so
+    # exactly one of them ever calls recorder.stop().
 
     def _on_trigger_press(self) -> bool:
-        """Attempt to start a recording. Returns True if recording actually
-        started, False if rejected (paused or already busy). Hold mode
-        ignores the return value; toggle mode uses it to decide whether to
-        flip into the "recording" state (see TriggerManager._fire_press).
+        """Attempt to start a recording. Returns True if the press was
+        accepted (recording start was kicked off), False if rejected
+        (paused or already busy). Hold mode ignores the return value;
+        toggle mode uses it to decide whether to flip into the "recording"
+        state (see TriggerManager._fire_press). The actual mic open and app
+        context capture happen on a background thread — this method itself
+        does only the accept/reject decision plus a lock-guarded state flip.
         """
         if self._paused:
             return False
 
-        with self._busy_lock:
-            if self._busy:
-                logger.warning("Trigger pressed while pipeline busy; rejecting")
-                sounds.play_error(self.cfg)
-                self.tray.notify("Still processing previous dictation")
-                return False
-            self._busy = True
+        if not self._session.press():
+            logger.warning("Trigger pressed while pipeline busy; rejecting")
+            sounds.play_error(self.cfg)
+            self.tray.notify("Still processing previous dictation")
+            return False
 
+        threading.Thread(target=self._start_recording_worker, daemon=True).start()
+        return True
+
+    def _start_recording_worker(self) -> None:
+        """Runs on a short-lived daemon thread after a press is accepted:
+        captures app context, opens the mic (recorder.start(), which can
+        take 50-300ms plus a device-enumeration cost on a cold cache), and
+        fires the start cue/state updates. None of this may run on the hook
+        thread (see module docstring).
+        """
         # Capture the foreground app NOW, before the user can alt-tab
         # elsewhere while speaking. None on any failure or when disabled.
-        self._pending_app_context = None
+        pending_app_context = None
         if getattr(self.cfg, "smart_context", True):
             try:
-                self._pending_app_context = context_mod.get_app_context()
+                pending_app_context = context_mod.get_app_context()
             except Exception as exc:
                 logger.debug("Failed to capture app context: %s", exc)
-                self._pending_app_context = None
+                pending_app_context = None
+        self._pending_app_context = pending_app_context
 
         try:
             self.recorder.start(
@@ -416,51 +456,45 @@ class App:
             logger.error("Failed to start recording: %s", exc)
             sounds.play_error(self.cfg)
             self.tray.notify(f"Microphone error: {exc}")
-            with self._busy_lock:
-                self._busy = False
-            return False
+            self._session.start_failed()
+            self.tray.set_state(tray_mod.STATE_IDLE)
+            overlay.set_state_threadsafe(overlay.STATE_IDLE)
+            return
+
+        result = self._session.start_succeeded()
+        if result.claimed:
+            # A release/cancel arrived while the mic was still opening (a
+            # very quick tap): honor it immediately rather than settling
+            # into RECORDING state first, so the state machine never gets
+            # wedged waiting for a release that already happened.
+            logger.debug("Trigger released/cancelled during recorder startup; finishing immediately")
+            self._run_finish(cancel=result.cancel)
+            return
 
         sounds.play_start(self.cfg)
         self.tray.set_state(tray_mod.STATE_RECORDING)
         overlay.set_state_threadsafe(overlay.STATE_RECORDING)
-        return True
 
     def _on_trigger_release(self) -> None:
-        if not self.recorder.is_recording:
-            # Nothing is actually recording (e.g. this release corresponds
-            # to a press that was rejected, or arrives while a previous
-            # dictation is still transcribing) — no-op rather than firing a
-            # spurious stop cue / state flash / empty work item.
-            return
-
-        with self._busy_lock:
-            if not self._busy:
-                return
-
-        self._finish_recording()
+        result = self._session.claim_finish(cancel=False)
+        if result.claimed:
+            threading.Thread(target=self._run_finish, kwargs={"cancel": False}, daemon=True).start()
+        # If result.pending is True, the starter thread (still opening the
+        # mic) will see the pending stop and finish as soon as recorder.start
+        # completes — nothing more to do here. If neither claimed nor
+        # pending, this release doesn't correspond to an in-progress
+        # recording (e.g. it followed a rejected press) — no-op.
 
     def _on_trigger_cancel(self) -> None:
-        """Esc was pressed while a recording was in progress: stop the
-        recorder and discard the captured audio (no enqueue) rather than
-        transcribing it.
+        """Esc was pressed while a recording was in progress (or still
+        starting): stop the recorder and discard the captured audio (no
+        enqueue) rather than transcribing it.
         """
-        if not self.recorder.is_recording:
-            return
-
-        with self._busy_lock:
-            if not self._busy:
-                return
-
-        try:
-            self.recorder.stop()
-        except Exception as exc:
-            logger.warning("Error stopping recorder on cancel: %s", exc)
-
-        sounds.play_error(self.cfg)
-        self.tray.set_state(tray_mod.STATE_IDLE)
-        overlay.set_state_threadsafe(overlay.STATE_IDLE)
-        with self._busy_lock:
-            self._busy = False
+        result = self._session.claim_finish(cancel=True)
+        if result.claimed:
+            threading.Thread(target=self._run_finish, kwargs={"cancel": True}, daemon=True).start()
+        # Pending case: the starter thread will discard once recorder.start
+        # completes, same as above.
 
     def _on_auto_stop(self) -> None:
         """Called from the recorder's audio callback (PortAudio) thread
@@ -468,24 +502,25 @@ class App:
         must not happen synchronously from within its own callback (that
         can deadlock), so the actual finish work is dispatched onto a
         short-lived daemon thread; this method itself only does the quick
-        state checks before returning control to the audio callback.
+        atomic claim before returning control to the audio callback.
         """
-        if not self.recorder.is_recording:
+        result = self._session.claim_finish(cancel=False)
+        if not result.claimed:
+            # Already claimed by a release/cancel that raced this auto-stop,
+            # or nothing is actually in progress — auto-stop is a no-op.
             return
 
-        with self._busy_lock:
-            if not self._busy:
-                return
-
         def _run():
-            self._finish_recording()
+            self._run_finish(cancel=False)
             self.tray.notify("Max recording length reached — transcribing")
 
         threading.Thread(target=_run, daemon=True).start()
 
-    def _finish_recording(self) -> None:
-        """Stop the recorder and hand the captured audio to the worker
-        queue. Shared by a normal trigger release and an auto-stop.
+    def _run_finish(self, cancel: bool) -> None:
+        """Stop the recorder and either enqueue the captured audio for
+        transcription (cancel=False) or discard it (cancel=True). Called
+        exactly once per recording — the caller must already hold the
+        FINISHING claim from `self._session.claim_finish()`.
         """
         try:
             audio = self.recorder.stop()
@@ -495,8 +530,14 @@ class App:
             self.tray.notify(f"Recording error: {exc}")
             self.tray.set_state(tray_mod.STATE_IDLE)
             overlay.set_state_threadsafe(overlay.STATE_IDLE)
-            with self._busy_lock:
-                self._busy = False
+            self._session.finished()
+            return
+
+        if cancel:
+            sounds.play_error(self.cfg)
+            self.tray.set_state(tray_mod.STATE_IDLE)
+            overlay.set_state_threadsafe(overlay.STATE_IDLE)
+            self._session.finished()
             return
 
         sounds.play_stop(self.cfg)
@@ -504,7 +545,8 @@ class App:
         overlay.set_state_threadsafe(overlay.STATE_TRANSCRIBING)
         # Carry the app context captured at trigger-press time through the
         # queue alongside the audio (a plain dict, not the None sentinel
-        # used for shutdown).
+        # used for shutdown). The worker thread transitions the session
+        # back to IDLE once processing completes (see _worker_loop).
         self._work_queue.put({"audio": audio, "app_context": self._pending_app_context})
 
     # --- worker thread ----------------------------------------------------
@@ -523,8 +565,7 @@ class App:
             finally:
                 self.tray.set_state(tray_mod.STATE_IDLE)
                 overlay.set_state_threadsafe(overlay.STATE_IDLE)
-                with self._busy_lock:
-                    self._busy = False
+                self._session.finished()
 
     def _recent_previous_text(self) -> Optional[str]:
         """Return the tail of the last successfully injected dictation if it
@@ -570,6 +611,12 @@ class App:
         if not self.cfg.clean_llm or not stage1_result:
             return stage1_result
 
+        # Trim explicitly here rather than relying on the caller (or the
+        # unrelated _last_injected_text storage cap) to have already capped
+        # this — keeps the cleanup-prompt budget self-contained (FIX 6a).
+        if previous:
+            previous = previous[-_PREVIOUS_CLEANUP_PROMPT_CHARS:]
+
         if self.cfg.backend == "cloud":
             try:
                 return cloud_mod.clean(raw_text, self.cfg, app_context=app_context, previous=previous)
@@ -587,6 +634,17 @@ class App:
         previous_text = self._recent_previous_text()
         initial_prompt = self._build_initial_prompt(previous_text)
 
+        # Re-read cfg.backend right here, immediately before routing (FIX 5,
+        # H1/L1) rather than trusting a value captured earlier/elsewhere: an
+        # item queued before a mid-flight backend switch must follow the
+        # NEW backend, not whatever was configured when it was recorded —
+        # the whole point of switching to cloud is to keep the GPU idle, so
+        # an item silently falling back to loading the local model right
+        # after the user switched away from it would defeat that. This is
+        # also the guard for the local branch: the only sanctioned way
+        # local ever loads while cfg.backend == "cloud" is the CloudError
+        # fallback below (intentional — keeps dictation working if Groq is
+        # briefly down), never a stale local route.
         stt_start = time.monotonic()
         if self.cfg.backend == "cloud":
             try:
@@ -618,12 +676,12 @@ class App:
         if not raw_text:
             return  # silence/empty: skip silently
 
-        if cleaner.is_hallucination(raw_text):
-            logger.debug("Discarding likely Whisper hallucination (%d chars)", len(raw_text))
-            return  # treat as empty, same as the silence path
-
         # Voice command: whole-utterance undo ("scratch that", etc.), only
-        # honored when a previous injection happened recently.
+        # honored when a previous injection happened recently. Checked
+        # BEFORE the hallucination guard (FIX 6b) — the two phrase sets are
+        # disjoint (see tests.test_cleaner.test_undo_and_hallucination_
+        # phrases_are_disjoint) but ordering undo first keeps the intent
+        # explicit regardless.
         if getattr(self.cfg, "voice_commands", True) and cleaner.is_undo_command(raw_text):
             if (
                 self._last_injected_at is not None
@@ -641,14 +699,21 @@ class App:
                 logger.info("Ignoring undo command; no recent injection")
             return
 
+        if cleaner.is_hallucination(raw_text):
+            logger.debug("Discarding likely Whisper hallucination (%d chars)", len(raw_text))
+            return  # treat as empty, same as the silence path
+
         clean_start = time.monotonic()
         clean_text = self._clean(raw_text, app_context=app_context, previous=previous_text)
         clean_elapsed = time.monotonic() - clean_start
         if not clean_text:
             return
 
-        text_input_focused = focus.is_text_input_focused()
-
+        # Inject FIRST (FIX 4): the focus probe is a 20-120ms UIA COM
+        # round-trip that only feeds the overlay's landed-in-textbox
+        # animation choice — it must not delay the paste itself. Run it
+        # after a successful inject so it also reflects where the text
+        # actually landed rather than where focus was a moment earlier.
         inject_start = time.monotonic()
         try:
             injector.inject(clean_text)
@@ -667,6 +732,7 @@ class App:
             sounds.play_error(self.cfg)
             self.tray.notify(f"Injection error: {exc}")
         else:
+            text_input_focused = focus.is_text_input_focused()
             self._last_injected_text = clean_text[-_PREVIOUS_CONTEXT_CHARS:]
             self._last_injected_at = time.monotonic()
             overlay.notify_result_threadsafe(

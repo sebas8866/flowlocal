@@ -42,6 +42,14 @@ class Recorder:
         self.on_auto_stop: Optional[Callable[[], None]] = None
         self._auto_stop_fired = False
 
+        # Cache of the last resolved (device_name -> device_index) lookup so
+        # start() doesn't have to call list_devices() (a full
+        # sd.query_devices() enumeration) on every single trigger press.
+        # Invalidated whenever the device set changes (refresh_devices())
+        # or the caller resolves a different name.
+        self._resolved_device_name: Optional[str] = None
+        self._resolved_device_index: Optional[int] = None
+
     @property
     def is_recording(self) -> bool:
         return self._recording
@@ -72,21 +80,33 @@ class Recorder:
             return
 
         if device_name:
-            resolved_index = None
-            try:
-                for idx, name in self.list_devices():
-                    if name == device_name:
-                        resolved_index = idx
-                        break
-            except Exception as exc:
-                logger.warning("Could not resolve mic device by name: %s", exc)
-            if resolved_index is not None:
-                device_index = resolved_index
+            if (
+                self._resolved_device_name == device_name
+                and self._resolved_device_index is not None
+            ):
+                device_index = self._resolved_device_index
             else:
-                logger.warning(
-                    "Mic device name %r not found; falling back to stored index/default",
-                    device_name,
-                )
+                resolved_index = None
+                try:
+                    for idx, name in self.list_devices():
+                        if name == device_name:
+                            resolved_index = idx
+                            break
+                except Exception as exc:
+                    logger.warning("Could not resolve mic device by name: %s", exc)
+                if resolved_index is not None:
+                    device_index = resolved_index
+                    self._resolved_device_name = device_name
+                    self._resolved_device_index = resolved_index
+                else:
+                    logger.warning(
+                        "Mic device name %r not found; falling back to stored index/default",
+                        device_name,
+                    )
+                    # Don't cache a miss: keep retrying resolution on
+                    # subsequent presses in case the device reappears.
+                    self._resolved_device_name = None
+                    self._resolved_device_index = None
 
         self._blocks = []
         self._recording = True
@@ -188,18 +208,27 @@ class Recorder:
 
     def refresh_devices(self) -> None:
         """Re-initialize PortAudio so newly plugged-in/removed input
-        devices are picked up without restarting the app. No-op while a
-        recording is in progress (tearing down PortAudio mid-stream would
-        break the active capture).
+        devices are picked up without restarting the app. Locked no-op
+        while a recording is in progress (tearing down PortAudio mid-stream
+        would break the active capture) — checked and skipped atomically
+        under `_lock` so a refresh can't interleave with a start() that is
+        in the middle of flipping `_recording` on.
+
+        Invalidates the resolved-device-name cache, since device indices
+        can shift after a PortAudio re-init.
         """
-        if self._recording:
-            logger.debug("refresh_devices skipped: recording in progress")
-            return
+        with self._lock:
+            if self._recording:
+                logger.debug("refresh_devices skipped: recording in progress")
+                return
 
-        import sounddevice as sd
+            import sounddevice as sd
 
-        try:
-            sd._terminate()
-            sd._initialize()
-        except Exception as exc:
-            logger.warning("Failed to refresh audio devices: %s", exc)
+            try:
+                sd._terminate()
+                sd._initialize()
+            except Exception as exc:
+                logger.warning("Failed to refresh audio devices: %s", exc)
+
+            self._resolved_device_name = None
+            self._resolved_device_index = None

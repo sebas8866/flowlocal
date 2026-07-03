@@ -15,7 +15,7 @@ Hold a key or your mouse's side button, speak, release — clean, punctuated tex
 - **Personal dictionary** — teach it names, product terms, and jargon once (Settings → Personal dictionary); they bias both speech recognition and the cleanup rewrite so they stop getting mangled.
 - **App-aware tone** — FlowLocal notices what app you're dictating into (Discord vs. Outlook vs. a code editor) and nudges the cleanup rewrite to match that app's natural style, without changing what you said.
 - **Continuity across dictations** — if you speak again within two minutes of your last dictation, FlowLocal quietly carries the tail of that previous text forward as context, so follow-up thoughts land coherently instead of being cleaned up in isolation.
-- **Voice commands** — say "new line" or "new paragraph" mid-dictation to insert real line breaks, or "scratch that" / "undo that" right after a dictation to undo it (Ctrl+Z) instead of manually deleting.
+- **Voice commands** — say "new line" or "new paragraph" mid-dictation to insert real line breaks, or "scratch that" / "undo that" right after a dictation to undo it (Ctrl+Z) instead of manually deleting. Recognition is slightly more reliable in AI-cleanup mode (`clean_llm: true`), where the LLM judges from context, than in rules-only mode, which matches the phrase with a more conservative regex to avoid false positives.
 - **Hallucination guards** — classic Whisper silence artifacts ("thank you for watching", "subtitles by the Amara.org community", etc.) are detected and silently discarded instead of getting pasted into your document.
 - **Rewrite prompt tuned for dictation, not summarization** — the stage-2 LLM rewrite is instructed to preserve every detail and your own word choice, collapsing only false starts/self-corrections and filler — never paraphrasing or shortening what you said.
 
@@ -67,6 +67,7 @@ Settings persist to `%APPDATA%\FlowLocal\config.json`. Most fields are editable 
 | `trigger` | str | `"mouse:x2"` | `mouse:x1`, `mouse:x2`, or `key:<combo>` (e.g. `key:f9`, `key:ctrl_l+space`) |
 | `mode` | str | `"hold"` | `hold` (push-to-talk) or `toggle` |
 | `mic_device` | int \| null | `null` | sounddevice index; `null` = system default |
+| `mic_device_name` | str \| null | `null` | preferred mic by name; resolved to an index at recording start so it survives device-index reshuffles |
 | `model` | str | `"large-v3-turbo"` | `large-v3-turbo`, `distil-large-v3`, or `small` |
 | `language` | str \| null | `null` | `null` = auto-detect |
 | `clean_fillers` | bool | `true` | stage-1 rule-based cleanup |

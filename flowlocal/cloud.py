@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import logging
+import threading
 import wave
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,27 @@ _GROQ_CHAT_URL = f"{_GROQ_BASE_URL}/chat/completions"
 _GROQ_MODELS_URL = f"{_GROQ_BASE_URL}/models"
 
 _SAMPLE_WIDTH_BYTES = 2  # 16-bit PCM
+
+# Lazily-created, module-level requests.Session shared by transcribe/clean/
+# check so repeated Groq calls reuse the same TLS connection instead of
+# renegotiating on every dictation (~100-350ms saved per call). The
+# pipeline is single-worker, so lock contention here is nil — the lock only
+# guards the one-time creation race (e.g. a settings "Test connection"
+# click landing at the same moment as a dictation).
+_session = None
+_session_lock = threading.Lock()
+
+
+def _get_session():
+    global _session
+    if _session is not None:
+        return _session
+    with _session_lock:
+        if _session is None:
+            import requests
+
+            _session = requests.Session()
+        return _session
 
 
 class CloudError(Exception):
@@ -78,9 +100,8 @@ def transcribe(audio, samplerate: int, cfg, prompt: str = None) -> str:
         data["prompt"] = prompt
 
     try:
-        import requests
-
-        resp = requests.post(
+        session = _get_session()
+        resp = session.post(
             _GROQ_TRANSCRIPTIONS_URL,
             headers={"Authorization": f"Bearer {key}"},
             data=data,
@@ -120,9 +141,8 @@ def clean(text: str, cfg, app_context=None, previous=None) -> str:
     }
 
     try:
-        import requests
-
-        resp = requests.post(
+        session = _get_session()
+        resp = session.post(
             _GROQ_CHAT_URL,
             headers={
                 "Authorization": f"Bearer {key}",
@@ -160,9 +180,8 @@ def check(cfg) -> tuple:
         return False, "No API key set"
 
     try:
-        import requests
-
-        resp = requests.get(
+        session = _get_session()
+        resp = session.get(
             _GROQ_MODELS_URL,
             headers={"Authorization": f"Bearer {key}"},
             timeout=10,

@@ -3,10 +3,11 @@
 Run with: py -3.11 -m unittest discover -s tests
 or:       py -3.11 -m unittest tests.test_cloud
 
-No real network calls are made: flowlocal.cloud imports `requests` lazily
-inside its functions, so these tests monkeypatch the module attribute
-`requests.post` / `requests.get` after importing `requests` themselves (a
-real third-party dependency of this project, already installed in .venv).
+No real network calls are made: flowlocal.cloud now reuses a module-level
+`requests.Session` (see cloud._get_session / FIX 2) rather than calling
+`requests.post`/`requests.get` directly, so these tests monkeypatch
+`cloud._get_session` to return a `_FakeSession` whose `.post`/`.get` are the
+test's fake functions.
 """
 import io
 import os
@@ -20,6 +21,19 @@ import requests
 
 from flowlocal import cloud
 from flowlocal.cloud import CloudError
+
+
+class _FakeSession:
+    """Stand-in for requests.Session exposing only the methods a given test
+    needs (post and/or get), matching the plain-function fakes' signatures
+    (no `self`/session argument).
+    """
+
+    def __init__(self, post=None, get=None):
+        if post is not None:
+            self.post = post
+        if get is not None:
+            self.get = get
 
 
 class FakeConfig:
@@ -134,12 +148,13 @@ class TestTranscribe(unittest.TestCase):
             captured["timeout"] = timeout
             return FakeResponse(status_code=200, text="  hello world  ")
 
-        orig_post = requests.post
-        requests.post = fake_post
+        fake_session = _FakeSession(post=fake_post)
+        orig_get_session = cloud._get_session
+        cloud._get_session = lambda: fake_session
         try:
             result = cloud.transcribe(audio, 16000, cfg)
         finally:
-            requests.post = orig_post
+            cloud._get_session = orig_get_session
 
         self.assertEqual(result, "hello world")
         self.assertEqual(captured["url"], cloud._GROQ_TRANSCRIPTIONS_URL)
@@ -162,12 +177,13 @@ class TestTranscribe(unittest.TestCase):
             captured["data"] = data
             return FakeResponse(status_code=200, text="ok")
 
-        orig_post = requests.post
-        requests.post = fake_post
+        fake_session = _FakeSession(post=fake_post)
+        orig_get_session = cloud._get_session
+        cloud._get_session = lambda: fake_session
         try:
             cloud.transcribe(audio, 16000, cfg)
         finally:
-            requests.post = orig_post
+            cloud._get_session = orig_get_session
 
         self.assertNotIn("language", captured["data"])
 
@@ -183,12 +199,13 @@ class TestTranscribe(unittest.TestCase):
             captured["data"] = data
             return FakeResponse(status_code=200, text="ok")
 
-        orig_post = requests.post
-        requests.post = fake_post
+        fake_session = _FakeSession(post=fake_post)
+        orig_get_session = cloud._get_session
+        cloud._get_session = lambda: fake_session
         try:
             cloud.transcribe(audio, 16000, cfg, prompt="Glossary: Aarav.")
         finally:
-            requests.post = orig_post
+            cloud._get_session = orig_get_session
 
         self.assertEqual(captured["data"]["prompt"], "Glossary: Aarav.")
 
@@ -204,12 +221,13 @@ class TestTranscribe(unittest.TestCase):
             captured["data"] = data
             return FakeResponse(status_code=200, text="ok")
 
-        orig_post = requests.post
-        requests.post = fake_post
+        fake_session = _FakeSession(post=fake_post)
+        orig_get_session = cloud._get_session
+        cloud._get_session = lambda: fake_session
         try:
             cloud.transcribe(audio, 16000, cfg)
         finally:
-            requests.post = orig_post
+            cloud._get_session = orig_get_session
 
         self.assertNotIn("prompt", captured["data"])
 
@@ -222,13 +240,14 @@ class TestTranscribe(unittest.TestCase):
         def fake_post(url, headers=None, data=None, files=None, timeout=None):
             return FakeResponse(status_code=401, text="unauthorized")
 
-        orig_post = requests.post
-        requests.post = fake_post
+        fake_session = _FakeSession(post=fake_post)
+        orig_get_session = cloud._get_session
+        cloud._get_session = lambda: fake_session
         try:
             with self.assertRaises(CloudError):
                 cloud.transcribe(audio, 16000, cfg)
         finally:
-            requests.post = orig_post
+            cloud._get_session = orig_get_session
 
     def test_empty_response_raises_cloud_error(self):
         import numpy as np
@@ -239,13 +258,14 @@ class TestTranscribe(unittest.TestCase):
         def fake_post(url, headers=None, data=None, files=None, timeout=None):
             return FakeResponse(status_code=200, text="   ")
 
-        orig_post = requests.post
-        requests.post = fake_post
+        fake_session = _FakeSession(post=fake_post)
+        orig_get_session = cloud._get_session
+        cloud._get_session = lambda: fake_session
         try:
             with self.assertRaises(CloudError):
                 cloud.transcribe(audio, 16000, cfg)
         finally:
-            requests.post = orig_post
+            cloud._get_session = orig_get_session
 
     def test_network_error_raises_cloud_error(self):
         import numpy as np
@@ -256,13 +276,14 @@ class TestTranscribe(unittest.TestCase):
         def fake_post(*args, **kwargs):
             raise requests.exceptions.ConnectionError("boom")
 
-        orig_post = requests.post
-        requests.post = fake_post
+        fake_session = _FakeSession(post=fake_post)
+        orig_get_session = cloud._get_session
+        cloud._get_session = lambda: fake_session
         try:
             with self.assertRaises(CloudError):
                 cloud.transcribe(audio, 16000, cfg)
         finally:
-            requests.post = orig_post
+            cloud._get_session = orig_get_session
 
 
 class TestClean(unittest.TestCase):
@@ -281,12 +302,13 @@ class TestClean(unittest.TestCase):
                 json_data={"choices": [{"message": {"content": "  Cleaned text.  "}}]},
             )
 
-        orig_post = requests.post
-        requests.post = fake_post
+        fake_session = _FakeSession(post=fake_post)
+        orig_get_session = cloud._get_session
+        cloud._get_session = lambda: fake_session
         try:
             result = cloud.clean("um cleaned text", cfg)
         finally:
-            requests.post = orig_post
+            cloud._get_session = orig_get_session
 
         self.assertEqual(result, "Cleaned text.")
         self.assertEqual(captured["url"], cloud._GROQ_CHAT_URL)
@@ -304,13 +326,14 @@ class TestClean(unittest.TestCase):
         def fake_post(url, headers=None, json=None, timeout=None):
             return FakeResponse(status_code=500)
 
-        orig_post = requests.post
-        requests.post = fake_post
+        fake_session = _FakeSession(post=fake_post)
+        orig_get_session = cloud._get_session
+        cloud._get_session = lambda: fake_session
         try:
             with self.assertRaises(CloudError):
                 cloud.clean("some text", cfg)
         finally:
-            requests.post = orig_post
+            cloud._get_session = orig_get_session
 
     def test_forwards_app_context_and_previous_into_prompt(self):
         cfg = FakeConfig(groq_api_key="secret-key")
@@ -324,8 +347,9 @@ class TestClean(unittest.TestCase):
                 json_data={"choices": [{"message": {"content": "Cleaned text here."}}]},
             )
 
-        orig_post = requests.post
-        requests.post = fake_post
+        fake_session = _FakeSession(post=fake_post)
+        orig_get_session = cloud._get_session
+        cloud._get_session = lambda: fake_session
         try:
             cloud.clean(
                 "some dictated text",
@@ -334,7 +358,7 @@ class TestClean(unittest.TestCase):
                 previous="earlier dictation tail",
             )
         finally:
-            requests.post = orig_post
+            cloud._get_session = orig_get_session
 
         content = captured["json"]["messages"][0]["content"]
         self.assertIn("Discord.exe", content)
@@ -351,13 +375,14 @@ class TestClean(unittest.TestCase):
                 json_data={"choices": [{"message": {"content": "x"}}]},
             )
 
-        orig_post = requests.post
-        requests.post = fake_post
+        fake_session = _FakeSession(post=fake_post)
+        orig_get_session = cloud._get_session
+        cloud._get_session = lambda: fake_session
         try:
             with self.assertRaises(CloudError):
                 cloud.clean("this is a reasonably long piece of dictated text", cfg)
         finally:
-            requests.post = orig_post
+            cloud._get_session = orig_get_session
 
 
 class TestCheck(unittest.TestCase):
@@ -372,12 +397,13 @@ class TestCheck(unittest.TestCase):
             captured["timeout"] = timeout
             return FakeResponse(status_code=200)
 
-        orig_get = requests.get
-        requests.get = fake_get
+        fake_session = _FakeSession(get=fake_get)
+        orig_get_session = cloud._get_session
+        cloud._get_session = lambda: fake_session
         try:
             ok, msg = cloud.check(cfg)
         finally:
-            requests.get = orig_get
+            cloud._get_session = orig_get_session
 
         self.assertTrue(ok)
         self.assertEqual(msg, "Connected")
@@ -391,12 +417,13 @@ class TestCheck(unittest.TestCase):
         def fake_get(url, headers=None, timeout=None):
             return FakeResponse(status_code=401)
 
-        orig_get = requests.get
-        requests.get = fake_get
+        fake_session = _FakeSession(get=fake_get)
+        orig_get_session = cloud._get_session
+        cloud._get_session = lambda: fake_session
         try:
             ok, msg = cloud.check(cfg)
         finally:
-            requests.get = orig_get
+            cloud._get_session = orig_get_session
 
         self.assertFalse(ok)
         self.assertTrue(msg)
@@ -407,15 +434,69 @@ class TestCheck(unittest.TestCase):
         def fake_get(*args, **kwargs):
             raise requests.exceptions.ConnectionError("boom")
 
-        orig_get = requests.get
-        requests.get = fake_get
+        fake_session = _FakeSession(get=fake_get)
+        orig_get_session = cloud._get_session
+        cloud._get_session = lambda: fake_session
         try:
             ok, msg = cloud.check(cfg)
         finally:
-            requests.get = orig_get
+            cloud._get_session = orig_get_session
 
         self.assertFalse(ok)
         self.assertTrue(msg)
+
+
+class TestSessionReuse(unittest.TestCase):
+    """FIX 2: transcribe/clean/check must reuse the same module-level
+    requests.Session rather than opening a new connection per call.
+    """
+
+    def setUp(self):
+        self._orig_session = cloud._session
+
+    def tearDown(self):
+        cloud._session = self._orig_session
+
+    def test_get_session_returns_same_object_across_calls(self):
+        cloud._session = None
+        first = cloud._get_session()
+        second = cloud._get_session()
+        self.assertIs(first, second)
+        self.assertIsInstance(first, requests.Session)
+
+    def test_transcribe_and_check_share_the_same_session(self):
+        cloud._session = None
+
+        seen_sessions = []
+        orig_get_session = cloud._get_session
+
+        def spying_get_session():
+            session = orig_get_session()
+            seen_sessions.append(session)
+            return session
+
+        cloud._get_session = spying_get_session
+        try:
+            import numpy as np
+
+            cfg = FakeConfig(groq_api_key="secret-key")
+            audio = np.zeros(16000, dtype="float32")
+
+            real_session_post = requests.Session.post
+            real_session_get = requests.Session.get
+            requests.Session.post = lambda self, *a, **k: FakeResponse(status_code=200, text="ok")
+            requests.Session.get = lambda self, *a, **k: FakeResponse(status_code=200)
+            try:
+                cloud.transcribe(audio, 16000, cfg)
+                cloud.check(cfg)
+            finally:
+                requests.Session.post = real_session_post
+                requests.Session.get = real_session_get
+        finally:
+            cloud._get_session = orig_get_session
+
+        self.assertEqual(len(seen_sessions), 2)
+        self.assertIs(seen_sessions[0], seen_sessions[1])
 
 
 class TestConfigNewFields(unittest.TestCase):
