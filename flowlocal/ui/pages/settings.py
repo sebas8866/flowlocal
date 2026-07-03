@@ -78,7 +78,7 @@ class SettingsPage:
         self.deps = deps
         self.app_window = app_window
 
-        self.frame = ctk.CTkScrollableFrame(parent, fg_color=theme.BG)
+        self.frame = ctk.CTkScrollableFrame(parent, fg_color=theme.PANEL_BG)
         self.frame.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(

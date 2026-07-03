@@ -25,14 +25,19 @@ _WINDOW_W = 920
 _WINDOW_H = 640
 _MIN_W = 760
 _MIN_H = 560
-_SIDEBAR_W = 210
+_SIDEBAR_W = 200
+_PANEL_INSET = 12
 
+# Nav items shown in the sidebar's main list. Settings is intentionally
+# excluded here — it lives in the bottom links row instead (see
+# _build_sidebar), matching the real Wispr Flow layout.
 _NAV_ITEMS = [
     ("home", "⌂", "Home"),
     ("history", "⏱", "History"),
     ("dictionary", "✎", "Dictionary"),
-    ("settings", "⚙", "Settings"),
 ]
+
+_HELP_URL = "https://github.com/sebas8866/flowlocal"
 
 _current_window = None  # module-level singleton guard
 
@@ -129,19 +134,38 @@ class _AppWindow:
         )
         sidebar.grid(row=0, column=0, sticky="nsw")
         sidebar.grid_propagate(False)
-        sidebar.grid_rowconfigure(5, weight=1)  # spacer pushes footer down
+        # Spacer row sits right after the nav list (row 0 = wordmark, rows
+        # 1..len(_NAV_ITEMS) = nav items) and pushes the promo card +
+        # footer down to the bottom of the sidebar.
+        _spacer_row = len(_NAV_ITEMS) + 1
+        sidebar.grid_rowconfigure(_spacer_row, weight=1)
         self.sidebar = sidebar
 
+        # --- wordmark row: waveform glyph + name + backend badge ---------
         wordmark = ctk.CTkFrame(sidebar, fg_color="transparent")
         wordmark.grid(row=0, column=0, sticky="ew", padx=theme.PAD_MD, pady=(theme.PAD_LG, theme.PAD_MD))
-        dot = ctk.CTkLabel(
-            wordmark, text="●", text_color=theme.ACCENT, font=theme.font(12), width=16
-        )
-        dot.pack(side="left")
+        ctk.CTkLabel(
+            wordmark, text="❙❙❙", text_color=theme.ACCENT, font=theme.font(11), width=16
+        ).pack(side="left")
         ctk.CTkLabel(
             wordmark, text="FlowLocal", font=theme.font(16, "bold"), text_color=theme.TEXT
         ).pack(side="left", padx=(4, 0))
 
+        self._backend_badge = ctk.CTkLabel(
+            wordmark,
+            text="Local",
+            font=theme.font(10, "bold"),
+            text_color=theme.TEXT_SECONDARY,
+            fg_color="transparent",
+            corner_radius=theme.CORNER_RADIUS_SM,
+            height=20,
+            width=52,
+            border_width=1,
+        )
+        self._backend_badge.pack(side="right")
+        self._style_backend_badge()
+
+        # --- nav list ------------------------------------------------------
         for i, (key, icon, label) in enumerate(_NAV_ITEMS, start=1):
             btn = ctk.CTkButton(
                 sidebar,
@@ -158,8 +182,57 @@ class _AppWindow:
             btn.grid(row=i, column=0, sticky="ew", padx=theme.PAD_SM, pady=2)
             self._nav_buttons[key] = btn
 
+        # Row _spacer_row is the flexible empty spacer (grid_rowconfigure
+        # above); the promo card and footer sit in the two rows after it.
+        promo_row = _spacer_row + 1
+        footer_row = promo_row + 1
+
+        self._build_promo_card(sidebar, promo_row)
+        self._build_footer(sidebar, footer_row)
+
+    def _style_backend_badge(self) -> None:
+        backend = getattr(self.cfg, "backend", "local")
+        label = "Cloud" if backend == "cloud" else "Local"
+        self._backend_badge.configure(text=label, border_color=theme.CARD_BORDER)
+
+    def _build_promo_card(self, sidebar, row: int) -> None:
+        import customtkinter as ctk
+
+        card = ctk.CTkFrame(sidebar, corner_radius=theme.CORNER_RADIUS, fg_color=theme.PROMO_BG)
+        card.grid(row=row, column=0, sticky="ew", padx=theme.PAD_MD, pady=(0, theme.PAD_SM))
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=theme.PAD_SM, pady=theme.PAD_SM)
+
+        ctk.CTkLabel(
+            inner, text="Unlimited dictation", font=theme.font(12, "bold"), text_color=theme.TEXT,
+            anchor="w", justify="left",
+        ).pack(anchor="w")
+
+        self._promo_body_label = ctk.CTkLabel(
+            inner,
+            text="",
+            font=theme.font(10),
+            text_color=theme.TEXT_SECONDARY,
+            anchor="w",
+            justify="left",
+            wraplength=_SIDEBAR_W - (2 * theme.PAD_MD) - (2 * theme.PAD_SM),
+        )
+        self._promo_body_label.pack(anchor="w", pady=(4, 0))
+        self._refresh_promo_card()
+
+    def _refresh_promo_card(self) -> None:
+        backend = getattr(self.cfg, "backend", "local")
+        if backend == "cloud":
+            text = "Powered by Groq cloud — still free, still unlimited."
+        else:
+            text = "No word limits, no subscription. Everything runs on your machine."
+        self._promo_body_label.configure(text=text)
+
+    def _build_footer(self, sidebar, row: int) -> None:
+        import customtkinter as ctk
+
         footer = ctk.CTkFrame(sidebar, fg_color="transparent")
-        footer.grid(row=6, column=0, sticky="ews", padx=theme.PAD_MD, pady=(0, theme.PAD_MD))
+        footer.grid(row=row, column=0, sticky="ews", padx=theme.PAD_MD, pady=(0, theme.PAD_MD))
 
         status_row = ctk.CTkFrame(footer, fg_color="transparent")
         status_row.pack(fill="x", pady=(0, 8))
@@ -172,35 +245,82 @@ class _AppWindow:
         )
         self._status_label.pack(side="left", padx=(4, 0))
 
-        theme_row = ctk.CTkFrame(footer, fg_color="transparent")
-        theme_row.pack(fill="x", pady=(0, 8))
-        ctk.CTkLabel(
-            theme_row, text="Dark mode", font=theme.font(11), text_color=theme.TEXT_SECONDARY
-        ).pack(side="left")
-        self._dark_switch = ctk.CTkSwitch(
-            theme_row,
+        dark_switch = ctk.CTkSwitch(
+            status_row,
             text="",
-            width=36,
+            width=32,
             command=self._on_theme_toggle,
             progress_color=theme.ACCENT,
         )
         if self.cfg.theme == "dark":
-            self._dark_switch.select()
-        self._dark_switch.pack(side="right")
+            dark_switch.select()
+        dark_switch.pack(side="right")
+        self._dark_switch = dark_switch
+
+        settings_link = ctk.CTkButton(
+            footer,
+            text="⚙  Settings",
+            anchor="w",
+            corner_radius=theme.CORNER_RADIUS_SM,
+            fg_color="transparent",
+            hover_color=theme.NAV_HOVER_BG,
+            text_color=theme.TEXT_SECONDARY,
+            font=theme.font(12),
+            height=28,
+            command=lambda: self.show_page("settings"),
+        )
+        settings_link.pack(fill="x", pady=(4, 0))
+        self._nav_buttons["settings"] = settings_link
+
+        help_link = ctk.CTkButton(
+            footer,
+            text="?  Help",
+            anchor="w",
+            corner_radius=theme.CORNER_RADIUS_SM,
+            fg_color="transparent",
+            hover_color=theme.NAV_HOVER_BG,
+            text_color=theme.TEXT_SECONDARY,
+            font=theme.font(12),
+            height=28,
+            command=self._on_help_click,
+        )
+        help_link.pack(fill="x", pady=(2, 0))
 
         from flowlocal import __version__
 
         ctk.CTkLabel(
             footer, text=f"v{__version__}", font=theme.font(10), text_color=theme.TEXT_SECONDARY
-        ).pack(anchor="w")
+        ).pack(anchor="w", pady=(6, 0))
+
+    @staticmethod
+    def _on_help_click() -> None:
+        import webbrowser
+
+        try:
+            webbrowser.open(_HELP_URL)
+        except Exception:
+            logger.exception("Failed to open help URL")
 
     def _build_page_area(self) -> None:
         import customtkinter as ctk
 
-        self.page_area = ctk.CTkFrame(self.win, fg_color=theme.BG, corner_radius=0)
-        self.page_area.grid(row=0, column=1, sticky="nsew")
-        self.page_area.grid_rowconfigure(0, weight=1)
-        self.page_area.grid_columnconfigure(0, weight=1)
+        # Outer wrapper keeps the beige background and provides the inset
+        # that makes the white panel "float" off the top/right/bottom
+        # edges, per the real Wispr Flow layout.
+        outer = ctk.CTkFrame(self.win, fg_color=theme.BG, corner_radius=0)
+        outer.grid(row=0, column=1, sticky="nsew")
+        outer.grid_rowconfigure(0, weight=1)
+        outer.grid_columnconfigure(0, weight=1)
+
+        panel = ctk.CTkFrame(outer, fg_color=theme.PANEL_BG, corner_radius=theme.CORNER_RADIUS_LG)
+        panel.grid(
+            row=0, column=0, sticky="nsew",
+            padx=(0, _PANEL_INSET), pady=(_PANEL_INSET, _PANEL_INSET),
+        )
+        panel.grid_rowconfigure(0, weight=1)
+        panel.grid_columnconfigure(0, weight=1)
+
+        self.page_area = panel
 
     def _build_pages(self) -> None:
         from flowlocal.ui.pages import dictionary as dictionary_page
@@ -272,6 +392,9 @@ class _AppWindow:
         else:
             self._status_label.configure(text="Listening")
             self._status_dot.configure(text_color=theme.SUCCESS)
+
+        self._style_backend_badge()
+        self._refresh_promo_card()
 
     # --- close ---------------------------------------------------------------
 

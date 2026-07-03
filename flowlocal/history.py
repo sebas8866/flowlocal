@@ -133,6 +133,21 @@ def clear() -> None:
         _write_raw([])
 
 
+def delete(ts: float) -> bool:
+    """Delete the entry with the given `ts`. Returns True if an entry was
+    removed, False if no entry matched. If multiple entries somehow share
+    the same `ts`, only the first match on disk is removed.
+    """
+    with _lock:
+        entries = _load_raw()
+        for i, entry in enumerate(entries):
+            if entry.get("ts") == ts:
+                del entries[i]
+                _write_raw(entries)
+                return True
+        return False
+
+
 def _local_midnight_ts(now: float) -> float:
     """Return the epoch timestamp for local midnight of the day containing
     `now`.

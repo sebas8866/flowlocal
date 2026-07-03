@@ -94,6 +94,26 @@ class TestClear(HistoryTestBase):
         self.assertEqual(history.all(), [])
 
 
+class TestDelete(HistoryTestBase):
+    def test_delete_removes_matching_entry(self):
+        history.add("one", ts=1.0)
+        history.add("two", ts=2.0)
+        history.add("three", ts=3.0)
+        result = history.delete(2.0)
+        self.assertTrue(result)
+        texts = [e["text"] for e in history.all()]
+        self.assertEqual(sorted(texts), ["one", "three"])
+
+    def test_delete_returns_false_when_not_found(self):
+        history.add("one", ts=1.0)
+        result = history.delete(999.0)
+        self.assertFalse(result)
+        self.assertEqual(len(history.all()), 1)
+
+    def test_delete_on_empty_history_returns_false(self):
+        self.assertFalse(history.delete(1.0))
+
+
 class TestStats(HistoryTestBase):
     def test_stats_empty(self):
         s = history.stats(now=_ts_for_days_ago(0))

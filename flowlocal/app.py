@@ -619,7 +619,7 @@ class App:
             return  # silence/empty: skip silently
 
         if cleaner.is_hallucination(raw_text):
-            logger.info("Discarding likely Whisper hallucination: %r", raw_text)
+            logger.debug("Discarding likely Whisper hallucination (%d chars)", len(raw_text))
             return  # treat as empty, same as the silence path
 
         # Voice command: whole-utterance undo ("scratch that", etc.), only

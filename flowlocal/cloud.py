@@ -91,7 +91,7 @@ def transcribe(audio, samplerate: int, cfg, prompt: str = None) -> str:
         raise CloudError(f"Network error: {exc}") from exc
 
     if resp.status_code != 200:
-        raise CloudError(f"Groq STT returned HTTP {resp.status_code}")
+        raise CloudError(f"Groq STT returned HTTP {resp.status_code}: {(resp.text or '')[:200]}")
 
     text = (resp.text or "").strip()
     if not text:
@@ -135,7 +135,7 @@ def clean(text: str, cfg, app_context=None, previous=None) -> str:
         raise CloudError(f"Network error: {exc}") from exc
 
     if resp.status_code != 200:
-        raise CloudError(f"Groq LLM returned HTTP {resp.status_code}")
+        raise CloudError(f"Groq LLM returned HTTP {resp.status_code}: {(resp.text or '')[:200]}")
 
     try:
         body = resp.json()
