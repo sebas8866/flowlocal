@@ -83,8 +83,23 @@ Settings persist to `%APPDATA%\FlowLocal\config.json`. Most fields are editable 
 | `vocabulary` | list[str] | `[]` | personal dictionary — names/terms biased in both STT and cleanup |
 | `smart_context` | bool | `true` | capture the foreground app + window title and pass it to the cleanup rewrite for tone-matching |
 | `voice_commands` | bool | `true` | enables "new line"/"new paragraph" and the "scratch that"/"undo that" undo command |
+| `theme` | str | `"light"` | `light`, `dark`, or `system` — app window appearance |
+| `save_history` | bool | `true` | record dictations locally for the History page (see below) |
 
 Default `filler_words`: `um, uh, uhm, er, ah, like, you know, i mean, sort of, kind of` — edit the list in `config.json` or Settings to add/remove words.
+
+## The app window
+
+Double-click the tray icon (or right-click → "Open FlowLocal") to open the app window — a Wispr Flow-style home base with four pages:
+
+- **Home** — today's word count, total words, average WPM, and current day streak, plus your 5 most recent dictations.
+- **History** — every past dictation, newest first, with live search and per-entry copy; "Clear history" needs a second confirming click.
+- **Dictionary** — add or remove personal-dictionary terms (names, jargon) without digging into Settings.
+- **Settings** — everything from the old settings dialog (microphone, trigger, model, language, cloud backend, cleanup toggles, autostart, etc.), reorganized into cards.
+
+The window supports light, dark, and system theme (toggle at the bottom of the sidebar; persisted in `config.json` as `theme`).
+
+**History is local-only**: dictations are stored purely on your machine at `%APPDATA%\FlowLocal\history.json` and never leave it. Turn it off anytime via Settings → "Save dictation history" (`save_history: false`); existing entries are kept until you clear them.
 
 ## Cloud mode (optional)
 

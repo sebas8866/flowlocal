@@ -20,6 +20,7 @@ DEFAULT_FILLER_WORDS = [
 VALID_MODELS = {"large-v3-turbo", "distil-large-v3", "small"}
 VALID_MODES = {"hold", "toggle"}
 VALID_BACKENDS = {"local", "cloud"}
+VALID_THEMES = {"light", "dark", "system"}
 
 
 def _app_data_dir() -> str:
@@ -61,6 +62,8 @@ class Config:
     vocabulary: list = field(default_factory=list)
     smart_context: bool = True
     voice_commands: bool = True
+    theme: str = "light"
+    save_history: bool = True
 
     def _validate(self) -> None:
         """Reset any field holding an invalid value back to its default."""
@@ -134,6 +137,12 @@ class Config:
 
         if not isinstance(self.voice_commands, bool):
             self.voice_commands = defaults["voice_commands"].default
+
+        if self.theme not in VALID_THEMES:
+            self.theme = defaults["theme"].default
+
+        if not isinstance(self.save_history, bool):
+            self.save_history = defaults["save_history"].default
 
     @classmethod
     def load(cls) -> "Config":

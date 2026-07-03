@@ -5,6 +5,7 @@ constructs and runs the App (single-instance guarded).
 """
 from __future__ import annotations
 
+import argparse
 import logging
 import logging.handlers
 import os
@@ -34,7 +35,18 @@ def _setup_logging() -> None:
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="FlowLocal")
+    parser.add_argument(
+        "--window",
+        action="store_true",
+        help="Open the app window on startup (for screenshot verification).",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
+    args = _parse_args()
     _setup_logging()
     logger = logging.getLogger(__name__)
     logger.info("FlowLocal starting")
@@ -72,7 +84,7 @@ def main() -> int:
 
     app = App(cfg)
     try:
-        app.run()
+        app.run(open_window_on_start=args.window)
     except Exception:
         logger.exception("Fatal error in App.run()")
         return 1

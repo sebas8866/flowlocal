@@ -23,7 +23,9 @@ Location: `%APPDATA%\FlowLocal\config.json` — the only persisted interface. Ex
   "cloud_llm_model": "llama-3.3-70b-versatile",
   "vocabulary": [],
   "smart_context": true,
-  "voice_commands": true
+  "voice_commands": true,
+  "theme": "light",
+  "save_history": true
 }
 ```
 
@@ -34,6 +36,8 @@ Guarantees:
 - `vocabulary`: list of non-empty strings (personal dictionary); any other shape reverts the whole list to `[]`. Used both as Whisper `initial_prompt` bias and in the stage-2 rewrite prompt.
 - `smart_context`: when `true`, the foreground app + window title is captured at trigger-press time and passed to the stage-2 rewrite prompt so tone can match the target app. `false` disables capture entirely.
 - `voice_commands`: when `true`, enables the "new line"/"new paragraph" stage-1 rule and the "scratch that"/"delete that"/"undo that"/"undo last" whole-utterance undo command.
+- `theme`: one of `light | dark | system`; controls the CustomTkinter appearance mode of the app window. Invalid values revert to `"light"`.
+- `save_history`: when `true`, each successful dictation (text + audio seconds) is appended to the local-only history store at `%APPDATA%\FlowLocal\history.json` (see the app window's History page). `false` disables recording entirely; existing history is left untouched.
 
 # Contract: Ollama cleanup call (optional external interface)
 

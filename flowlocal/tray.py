@@ -47,10 +47,12 @@ class Tray:
 
     def __init__(
         self,
+        on_open: Optional[Callable[[], None]] = None,
         on_settings: Optional[Callable[[], None]] = None,
         on_toggle_pause: Optional[Callable[[], None]] = None,
         on_quit: Optional[Callable[[], None]] = None,
     ) -> None:
+        self._on_open = on_open
         self._on_settings = on_settings
         self._on_toggle_pause = on_toggle_pause
         self._on_quit = on_quit
@@ -70,6 +72,7 @@ class Tray:
         from flowlocal import __version__
 
         menu = pystray.Menu(
+            pystray.MenuItem("Open FlowLocal", self._handle_open, default=True),
             pystray.MenuItem("Settings", self._handle_settings),
             pystray.MenuItem(
                 self._pause_label, self._handle_toggle_pause
@@ -95,6 +98,10 @@ class Tray:
 
     def _pause_label(self, item=None) -> str:
         return "Resume" if self._paused else "Pause"
+
+    def _handle_open(self, icon=None, item=None) -> None:
+        if self._on_open:
+            self._on_open()
 
     def _handle_settings(self, icon=None, item=None) -> None:
         if self._on_settings:

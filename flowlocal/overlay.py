@@ -1,7 +1,7 @@
 """Persistent floating status pill + on-demand text popup (tkinter),
 bottom-center of the screen. Replaces the old always-on toast.
 
-THREADING MODEL (must match flowlocal/app.py and flowlocal/settings_ui.py):
+THREADING MODEL (must match flowlocal/app.py and flowlocal/ui/window.py):
 tkinter's Tcl interpreter is not thread-safe and must only be touched on
 the process's MAIN thread. All widget creation/mutation in this module
 happens on the main thread only. Since the dictation pipeline and trigger

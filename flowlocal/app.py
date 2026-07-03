@@ -1,6 +1,6 @@
 """App wiring: single-instance guard, state machine, pipeline worker.
 
-THREADING MODEL (see also flowlocal/settings_ui.py docstring):
+THREADING MODEL (see also flowlocal/ui/window.py docstring):
 - The Tk root (hidden/withdrawn) runs `mainloop()` on the MAIN thread for
   the lifetime of the process. This is required because Tcl/Tk is not
   thread-safe.
@@ -30,10 +30,11 @@ from flowlocal import cleaner
 from flowlocal import cloud as cloud_mod
 from flowlocal import context as context_mod
 from flowlocal import focus
+from flowlocal import history as history_mod
 from flowlocal import injector
 from flowlocal import overlay
 from flowlocal import tray as tray_mod
-from flowlocal import settings_ui
+from flowlocal import ui as app_ui
 from flowlocal import autostart
 from flowlocal import hotkey as hotkey_mod
 from flowlocal.recorder import Recorder
@@ -92,6 +93,7 @@ class App:
         self.transcriber = Transcriber(self.cfg.model)
         self.transcriber.on_status = self._on_transcriber_status
         self.tray = tray_mod.Tray(
+            on_open=self._open_home,
             on_settings=self._open_settings,
             on_toggle_pause=self._toggle_pause,
             on_quit=self.quit,
@@ -123,10 +125,14 @@ class App:
 
     # --- lifecycle ----------------------------------------------------
 
-    def run(self) -> None:
+    def run(self, open_window_on_start: bool = False) -> None:
         """Blocking entrypoint. Runs the Tk mainloop on this (main) thread
         after starting the tray, listeners, and worker on background
         threads.
+
+        `open_window_on_start` opens the app window (home page) right
+        away — used by `python -m flowlocal --window` for screenshot
+        verification without needing to click the tray icon.
         """
         import tkinter as tk
 
@@ -142,6 +148,9 @@ class App:
         self.trigger_manager.start()
         self.tray.run_detached()
         threading.Thread(target=self._warmup, daemon=True).start()
+
+        if open_window_on_start:
+            self._tk_root.after(0, self._open_home)
 
         try:
             self._tk_root.mainloop()
@@ -195,39 +204,52 @@ class App:
 
     # --- tray callbacks -------------------------------------------------
 
-    def _open_settings(self) -> None:
+    def _build_ui_deps(self) -> dict:
+        return {
+            "list_devices": self._list_devices_safe,
+            "refresh_devices": self._refresh_devices_safe,
+            "on_mic_change": self._on_mic_change,
+            "on_trigger_change": self._on_trigger_change,
+            "on_mode_change": self._on_mode_change,
+            "on_model_change": self._on_model_change,
+            "on_language_change": self._on_language_change,
+            "on_clean_fillers_change": self._on_clean_fillers_change,
+            "on_clean_llm_change": self._on_clean_llm_change,
+            "on_sounds_change": self._on_sounds_change,
+            "on_autostart_change": self._on_autostart_change,
+            "on_show_overlay_change": self._on_show_overlay_change,
+            "on_backend_change": self._on_backend_change,
+            "on_groq_api_key_change": self._on_groq_api_key_change,
+            "on_cloud_stt_model_change": self._on_cloud_stt_model_change,
+            "on_cloud_llm_model_change": self._on_cloud_llm_model_change,
+            "on_vocabulary_change": self._on_vocabulary_change,
+            "on_smart_context_change": self._on_smart_context_change,
+            "on_voice_commands_change": self._on_voice_commands_change,
+            "on_theme_change": self._on_theme_change,
+            "on_save_history_change": self._on_save_history_change,
+            "ollama_available": cleaner.ollama_available,
+            "groq_check": cloud_mod.check,
+            "capture_next": self.trigger_manager.capture_next,
+            "cancel_capture": self.trigger_manager.cancel_capture,
+            "is_paused": lambda: self._paused,
+            "history": history_mod,
+        }
+
+    def _open_window(self, page: str) -> None:
         if self._tk_root is None:
             return
 
         def _do_open():
-            deps = {
-                "list_devices": self._list_devices_safe,
-                "refresh_devices": self._refresh_devices_safe,
-                "on_mic_change": self._on_mic_change,
-                "on_trigger_change": self._on_trigger_change,
-                "on_mode_change": self._on_mode_change,
-                "on_model_change": self._on_model_change,
-                "on_language_change": self._on_language_change,
-                "on_clean_fillers_change": self._on_clean_fillers_change,
-                "on_clean_llm_change": self._on_clean_llm_change,
-                "on_sounds_change": self._on_sounds_change,
-                "on_autostart_change": self._on_autostart_change,
-                "on_show_overlay_change": self._on_show_overlay_change,
-                "on_backend_change": self._on_backend_change,
-                "on_groq_api_key_change": self._on_groq_api_key_change,
-                "on_cloud_stt_model_change": self._on_cloud_stt_model_change,
-                "on_cloud_llm_model_change": self._on_cloud_llm_model_change,
-                "on_vocabulary_change": self._on_vocabulary_change,
-                "on_smart_context_change": self._on_smart_context_change,
-                "on_voice_commands_change": self._on_voice_commands_change,
-                "ollama_available": cleaner.ollama_available,
-                "groq_check": cloud_mod.check,
-                "capture_next": self.trigger_manager.capture_next,
-                "cancel_capture": self.trigger_manager.cancel_capture,
-            }
-            settings_ui.open_settings(self._tk_root, self.cfg, deps)
+            deps = self._build_ui_deps()
+            app_ui.open_window(self._tk_root, self.cfg, deps, page=page)
 
         self._tk_root.after(0, _do_open)
+
+    def _open_home(self) -> None:
+        self._open_window("home")
+
+    def _open_settings(self) -> None:
+        self._open_window("settings")
 
     def _toggle_pause(self) -> None:
         self._paused = not self._paused
@@ -334,6 +356,16 @@ class App:
 
     def _on_voice_commands_change(self, value: bool) -> None:
         self.cfg.voice_commands = value
+
+    def _on_theme_change(self, value: str) -> None:
+        self.cfg.theme = value
+        try:
+            self.cfg.save()
+        except Exception as exc:
+            logger.warning("Failed to persist theme change: %s", exc)
+
+    def _on_save_history_change(self, value: bool) -> None:
+        self.cfg.save_history = value
 
     def _on_autostart_change(self, value: bool) -> None:
         self.cfg.autostart = value
@@ -646,3 +678,9 @@ class App:
                 "dictation: %.1fs audio | stt %.2fs | clean %.2fs | inject %.2fs",
                 audio_seconds, stt_elapsed, clean_elapsed, inject_elapsed,
             )
+
+        if getattr(self.cfg, "save_history", True) and clean_text:
+            try:
+                history_mod.add(clean_text, seconds=audio_seconds)
+            except Exception as exc:
+                logger.warning("Failed to record dictation history: %s", exc)
