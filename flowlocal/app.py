@@ -27,6 +27,7 @@ from typing import Optional
 from flowlocal import config as config_mod
 from flowlocal import sounds
 from flowlocal import cleaner
+from flowlocal import cloud as cloud_mod
 from flowlocal import focus
 from flowlocal import injector
 from flowlocal import overlay
@@ -131,10 +132,16 @@ class App:
 
     def _warmup(self) -> None:
         """Pre-load the STT model (and JIT CUDA kernels) plus the Ollama
-        model so the first real dictation responds at full speed.
+        model so the first real dictation responds at full speed. Skipped
+        entirely when backend == "cloud": the GPU should stay idle and the
+        cloud API needs no warmup.
         """
-        self.transcriber.warmup()
-        cleaner.warmup(self.cfg)
+        if self.cfg.backend == "cloud":
+            logger.info("Backend active: cloud (Groq) — skipping local model warmup")
+        else:
+            logger.info("Backend active: local")
+            self.transcriber.warmup()
+            cleaner.warmup(self.cfg)
         # Pay the one-time comtypes codegen cost (~0.5s) now, on this
         # warmup thread, without creating/caching a COM object here — UIA
         # COM objects are per-thread and must not be created on this thread
@@ -188,7 +195,12 @@ class App:
                 "on_sounds_change": self._on_sounds_change,
                 "on_autostart_change": self._on_autostart_change,
                 "on_show_overlay_change": self._on_show_overlay_change,
+                "on_backend_change": self._on_backend_change,
+                "on_groq_api_key_change": self._on_groq_api_key_change,
+                "on_cloud_stt_model_change": self._on_cloud_stt_model_change,
+                "on_cloud_llm_model_change": self._on_cloud_llm_model_change,
                 "ollama_available": cleaner.ollama_available,
+                "groq_check": cloud_mod.check,
                 "capture_next": self.trigger_manager.capture_next,
                 "cancel_capture": self.trigger_manager.cancel_capture,
             }
@@ -263,6 +275,35 @@ class App:
     def _on_show_overlay_change(self, value: bool) -> None:
         self.cfg.show_overlay = value
         overlay.set_enabled_threadsafe(value)
+
+    def _on_backend_change(self, backend: str) -> None:
+        self.cfg.backend = backend
+
+        if backend == "cloud":
+            def _release():
+                try:
+                    self.transcriber.release()
+                except Exception as exc:
+                    logger.warning("Failed to release local transcriber: %s", exc)
+                try:
+                    cleaner.unload(self.cfg)
+                except Exception as exc:
+                    logger.debug("Failed to unload Ollama model: %s", exc)
+
+            logger.info("Backend switched to cloud — freeing local GPU resources")
+            threading.Thread(target=_release, daemon=True).start()
+        else:
+            logger.info("Backend switched to local — warming up local models")
+            threading.Thread(target=self._warmup, daemon=True).start()
+
+    def _on_groq_api_key_change(self, value: str) -> None:
+        self.cfg.groq_api_key = value
+
+    def _on_cloud_stt_model_change(self, value: str) -> None:
+        self.cfg.cloud_stt_model = value
+
+    def _on_cloud_llm_model_change(self, value: str) -> None:
+        self.cfg.cloud_llm_model = value
 
     def _on_autostart_change(self, value: bool) -> None:
         self.cfg.autostart = value
@@ -410,26 +451,60 @@ class App:
                 with self._busy_lock:
                     self._busy = False
 
+    def _clean(self, raw_text: str) -> str:
+        """Stage-1 rules always run locally. Stage-2 LLM rewrite (when
+        cfg.clean_llm) goes to Groq on the cloud backend or Ollama on the
+        local backend. A cloud stage-2 failure keeps the stage-1 text
+        rather than falling back to Ollama (that would defeat the point of
+        cloud mode — keeping the GPU idle).
+        """
+        stage1_result = cleaner._stage1_rules(raw_text, self.cfg)
+        if not self.cfg.clean_llm or not stage1_result:
+            return stage1_result
+
+        if self.cfg.backend == "cloud":
+            try:
+                return cloud_mod.clean(raw_text, self.cfg)
+            except cloud_mod.CloudError as exc:
+                logger.warning("Cloud cleanup failed, keeping stage-1 text: %s", exc)
+                return stage1_result
+
+        return cleaner.clean(raw_text, self.cfg)
+
     def _process(self, audio) -> None:
         import time
 
         audio_seconds = len(audio) / 16000.0 if audio is not None else 0.0
 
         stt_start = time.monotonic()
-        try:
-            raw_text = self.transcriber.transcribe(audio, language=self.cfg.language)
-        except Exception as exc:
-            logger.error("Transcription failed: %s", exc)
-            sounds.play_error(self.cfg)
-            self.tray.notify(f"Transcription failed: {exc}")
-            return
+        if self.cfg.backend == "cloud":
+            try:
+                raw_text = cloud_mod.transcribe(audio, 16000, self.cfg)
+            except cloud_mod.CloudError as exc:
+                logger.warning("Cloud transcription failed (%s); falling back to local", exc)
+                self.tray.notify(f"Cloud transcription failed ({exc}) — using local model")
+                try:
+                    raw_text = self.transcriber.transcribe(audio, language=self.cfg.language)
+                except Exception as exc2:
+                    logger.error("Local fallback transcription failed: %s", exc2)
+                    sounds.play_error(self.cfg)
+                    self.tray.notify(f"Transcription failed: {exc2}")
+                    return
+        else:
+            try:
+                raw_text = self.transcriber.transcribe(audio, language=self.cfg.language)
+            except Exception as exc:
+                logger.error("Transcription failed: %s", exc)
+                sounds.play_error(self.cfg)
+                self.tray.notify(f"Transcription failed: {exc}")
+                return
         stt_elapsed = time.monotonic() - stt_start
 
         if not raw_text:
             return  # silence/empty: skip silently
 
         clean_start = time.monotonic()
-        clean_text = cleaner.clean(raw_text, self.cfg)
+        clean_text = self._clean(raw_text)
         clean_elapsed = time.monotonic() - clean_start
         if not clean_text:
             return

@@ -16,7 +16,11 @@ Location: `%APPDATA%\FlowLocal\config.json` — the only persisted interface. Ex
   "autostart": true,
   "sounds": true,
   "max_record_seconds": 300,
-  "show_overlay": true
+  "show_overlay": true,
+  "backend": "local",
+  "groq_api_key": "",
+  "cloud_stt_model": "whisper-large-v3-turbo",
+  "cloud_llm_model": "llama-3.3-70b-versatile"
 }
 ```
 
@@ -28,3 +32,11 @@ Guarantees:
 # Contract: Ollama cleanup call (optional external interface)
 
 `POST http://127.0.0.1:11434/api/generate` with `{"model": cfg.ollama_model, "prompt": <rewrite prompt + transcript>, "stream": false, "options": {"temperature": 0.2}}` → response `.response` used verbatim as cleaned text. 30 s timeout; any failure ⇒ fall back to stage-1 text. Never called when `clean_llm` is false.
+
+# Contract: Groq cloud calls (optional external interface)
+
+Only called when `cfg.backend == "cloud"` and `cfg.groq_api_key` is non-empty.
+
+- **STT**: `POST https://api.groq.com/openai/v1/audio/transcriptions`, multipart form with `model=cfg.cloud_stt_model`, `response_format=text`, `language=cfg.language` (omitted when `null`/auto), `file=("audio.wav", <16-bit PCM WAV bytes>, "audio/wav")`, header `Authorization: Bearer <cfg.groq_api_key>`. 20 s timeout. Response body (plain text) used verbatim as the transcript. Any failure (missing key, network error, non-200, empty response) raises `CloudError`; the caller falls back to the local Whisper transcriber for that dictation.
+- **Cleanup**: `POST https://api.groq.com/openai/v1/chat/completions` with `{"model": cfg.cloud_llm_model, "temperature": 0.2, "messages": [{"role": "user", "content": <same rewrite prompt as Ollama>}]}`, same auth header. 20 s timeout. `.choices[0].message.content` used as the rewritten text, subject to the same sanity check as the Ollama path. Any failure raises `CloudError`; the caller keeps the stage-1 (rule-based) text — it does NOT fall back to Ollama. Never called when `clean_llm` is false.
+- **Connection check**: `GET https://api.groq.com/openai/v1/models` with the same auth header, 10 s timeout — used by the Settings "Test connection" button only.

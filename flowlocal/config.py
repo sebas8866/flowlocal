@@ -19,6 +19,7 @@ DEFAULT_FILLER_WORDS = [
 
 VALID_MODELS = {"large-v3-turbo", "distil-large-v3", "small"}
 VALID_MODES = {"hold", "toggle"}
+VALID_BACKENDS = {"local", "cloud"}
 
 
 def _app_data_dir() -> str:
@@ -53,6 +54,10 @@ class Config:
     sounds: bool = True
     max_record_seconds: int = 300
     show_overlay: bool = True
+    backend: str = "local"
+    groq_api_key: str = ""
+    cloud_stt_model: str = "whisper-large-v3-turbo"
+    cloud_llm_model: str = "llama-3.3-70b-versatile"
 
     def _validate(self) -> None:
         """Reset any field holding an invalid value back to its default."""
@@ -103,6 +108,18 @@ class Config:
 
         if not isinstance(self.show_overlay, bool):
             self.show_overlay = defaults["show_overlay"].default
+
+        if self.backend not in VALID_BACKENDS:
+            self.backend = defaults["backend"].default
+
+        if not isinstance(self.groq_api_key, str):
+            self.groq_api_key = defaults["groq_api_key"].default
+
+        if not isinstance(self.cloud_stt_model, str) or not self.cloud_stt_model:
+            self.cloud_stt_model = defaults["cloud_stt_model"].default
+
+        if not isinstance(self.cloud_llm_model, str) or not self.cloud_llm_model:
+            self.cloud_llm_model = defaults["cloud_llm_model"].default
 
     @classmethod
     def load(cls) -> "Config":

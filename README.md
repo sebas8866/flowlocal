@@ -67,8 +67,28 @@ Settings persist to `%APPDATA%\FlowLocal\config.json`. Most fields are editable 
 | `sounds` | bool | `true` | audible start/stop/error cues |
 | `max_record_seconds` | int | `300` | hard stop safeguard |
 | `show_overlay` | bool | `true` | show the bottom waveform pill |
+| `backend` | str | `"local"` | `local` or `cloud` — see [Cloud mode](#cloud-mode-optional) |
+| `groq_api_key` | str | `""` | your Groq API key (only used when `backend` is `cloud`) |
+| `cloud_stt_model` | str | `"whisper-large-v3-turbo"` | Groq speech-to-text model |
+| `cloud_llm_model` | str | `"llama-3.3-70b-versatile"` | Groq chat model used for cleanup rewrite |
 
 Default `filler_words`: `um, uh, uhm, er, ah, like, you know, i mean, sort of, kind of` — edit the list in `config.json` or Settings to add/remove words.
+
+## Cloud mode (optional)
+
+By default FlowLocal runs 100% locally: the Whisper model and the Ollama cleanup model both load into your GPU's VRAM, which can slow the machine down during dictation. Cloud mode offloads both steps — transcription and cleanup — to [Groq](https://groq.com)'s API instead, so your GPU and CPU stay idle. Local stays the default; this is opt-in.
+
+**What it does**: when `backend` is set to `cloud`, FlowLocal sends your recorded audio to `api.groq.com` for transcription and, if LLM cleanup is enabled, sends the raw transcript there again for the grammar/false-start rewrite. No local models are loaded or warmed up in this mode.
+
+**Getting a free key**: sign up at [console.groq.com/keys](https://console.groq.com/keys) and create an API key — Groq's free tier is generous and fast.
+
+**Enabling it**: open Settings → *Processing* → choose "Cloud (Groq — fastest, needs internet)", paste your API key, and click "Test connection" to confirm it works before saving.
+
+**Privacy note**: with cloud mode enabled, your dictated audio (and the raw transcript, for cleanup) is sent to Groq's servers. The default configuration never sends anything anywhere — cloud mode is entirely opt-in and can be switched off at any time.
+
+**Where the key is stored**: like the rest of your settings, the Groq API key is saved in plaintext at `%APPDATA%\FlowLocal\config.json`. This file is user-local (not synced or shared); treat it like any other local secret.
+
+If a cloud transcription call fails (bad key, network issue, etc.), FlowLocal automatically falls back to the local Whisper model for that dictation and notifies you via the tray. If the cloud cleanup call fails, FlowLocal keeps the rule-based (stage-1) cleanup result rather than falling back to Ollama.
 
 ## Troubleshooting
 

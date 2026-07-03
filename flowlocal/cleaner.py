@@ -20,7 +20,7 @@ _OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 _OLLAMA_GENERATE_URL = f"{_OLLAMA_BASE_URL}/api/generate"
 _OLLAMA_TAGS_URL = f"{_OLLAMA_BASE_URL}/api/tags"
 
-_REWRITE_PROMPT = (
+REWRITE_PROMPT = (
     "You are a transcript cleanup engine. Rewrite the following dictated "
     "speech transcript:\n"
     "- Remove filler words (um, uh, like, you know, etc.)\n"
@@ -35,6 +35,8 @@ _REWRITE_PROMPT = (
     "explanation\n\n"
     "Transcript:\n{text}"
 )
+# Backward-compatible alias for existing internal references.
+_REWRITE_PROMPT = REWRITE_PROMPT
 
 # --- Stage 1: pure stdlib rule-based cleanup -------------------------------
 
@@ -174,7 +176,10 @@ def ollama_available() -> bool:
     return available
 
 
-def _sanity_check(original: str, rewritten: str) -> bool:
+def sanity_check(original: str, rewritten: str) -> bool:
+    """Reject empty or implausibly-sized LLM rewrites. Shared by the Ollama
+    and Groq cleanup paths so both apply the same output-sanity guard.
+    """
     if not rewritten or not rewritten.strip():
         return False
     orig_len = len(original.strip())
@@ -182,6 +187,10 @@ def _sanity_check(original: str, rewritten: str) -> bool:
     if orig_len == 0:
         return False
     return (orig_len * 0.3) <= new_len <= (orig_len * 3.0)
+
+
+# Backward-compatible alias for existing internal references.
+_sanity_check = sanity_check
 
 
 def _stage2_llm_rewrite(text: str, cfg, stage1_result: str) -> str:
@@ -241,6 +250,29 @@ def warmup(cfg) -> None:
         logger.info("Ollama model warmed up")
     except Exception as exc:
         logger.debug("Ollama warmup failed: %s", exc)
+
+
+def unload(cfg) -> None:
+    """Best-effort: evict the Ollama model from VRAM by asking it to stop
+    keeping itself alive. Fire-and-forget; swallow all errors — this is a
+    courtesy call made when switching to cloud backend, never load-bearing.
+    """
+    try:
+        import requests
+
+        requests.post(
+            _OLLAMA_GENERATE_URL,
+            json={
+                "model": getattr(cfg, "ollama_model", "qwen2.5:7b-instruct"),
+                "prompt": "",
+                "stream": False,
+                "keep_alive": 0,
+            },
+            timeout=5,
+        )
+        logger.info("Ollama model unload requested")
+    except Exception as exc:
+        logger.debug("Ollama unload failed (non-fatal): %s", exc)
 
 
 def clean(text: str, cfg) -> str:

@@ -49,6 +49,11 @@ _LANGUAGES = [
     ("ar", "Arabic"),
 ]
 
+_BACKEND_PRESETS = [
+    ("local", "Local (private, offline)"),
+    ("cloud", "Cloud (Groq — fastest, needs internet)"),
+]
+
 _current_window = None  # module-level singleton guard
 
 
@@ -80,6 +85,20 @@ def _model_value_to_label(value: str) -> str:
     return _MODEL_PRESETS[0][1]
 
 
+def _backend_label_to_value(label: str) -> str:
+    for value, lbl in _BACKEND_PRESETS:
+        if lbl == label:
+            return value
+    return _BACKEND_PRESETS[0][0]
+
+
+def _backend_value_to_label(value: str) -> str:
+    for v, lbl in _BACKEND_PRESETS:
+        if v == value:
+            return lbl
+    return _BACKEND_PRESETS[0][1]
+
+
 def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
     """Open (or focus) the settings window.
 
@@ -98,7 +117,12 @@ def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
         on_sounds_change(bool)
         on_autostart_change(bool)
         on_show_overlay_change(bool)
+        on_backend_change(backend_str)
+        on_groq_api_key_change(key_str)
+        on_cloud_stt_model_change(model_str)
+        on_cloud_llm_model_change(model_str)
         ollama_available() -> bool
+        groq_check(cfg) -> tuple[bool, str]  # flowlocal.cloud.check
         capture_next(callback) -> None  # TriggerManager.capture_next
         cancel_capture() -> None
     """
@@ -258,6 +282,106 @@ def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
     language_combo.grid(row=row, column=1, sticky="ew", pady=4)
     row += 1
 
+    # --- Processing (backend) --------------------------------------------
+    ttk.Separator(frame, orient="horizontal").grid(
+        row=row, column=0, columnspan=2, sticky="ew", pady=(8, 8)
+    )
+    row += 1
+
+    ttk.Label(frame, text="Processing:").grid(row=row, column=0, sticky="w", pady=4)
+    backend_var = tk.StringVar(value=_backend_value_to_label(cfg.backend))
+    backend_combo = ttk.Combobox(
+        frame,
+        textvariable=backend_var,
+        values=[lbl for _v, lbl in _BACKEND_PRESETS],
+        state="readonly",
+        width=32,
+    )
+    backend_combo.grid(row=row, column=1, sticky="ew", pady=4)
+    row += 1
+
+    ttk.Label(frame, text="Groq API key:").grid(row=row, column=0, sticky="w", pady=4)
+    key_row_frame = ttk.Frame(frame)
+    key_row_frame.grid(row=row, column=1, sticky="ew", pady=4)
+    api_key_var = tk.StringVar(value=cfg.groq_api_key)
+    api_key_entry = ttk.Entry(key_row_frame, textvariable=api_key_var, show="•", width=24)
+    api_key_entry.pack(side="left", fill="x", expand=True)
+
+    show_key_var = tk.BooleanVar(value=False)
+
+    def _on_toggle_show_key() -> None:
+        api_key_entry.config(show="" if show_key_var.get() else "•")
+
+    ttk.Checkbutton(
+        key_row_frame, text="Show", variable=show_key_var, command=_on_toggle_show_key
+    ).pack(side="left", padx=(4, 0))
+    row += 1
+
+    ttk.Label(
+        frame,
+        text="Free API key: console.groq.com/keys",
+        font=("TkDefaultFont", 8),
+        foreground="#666666",
+    ).grid(row=row, column=1, sticky="w", pady=(0, 4))
+    row += 1
+
+    key_missing_var = tk.StringVar(value="")
+    key_missing_label = ttk.Label(frame, textvariable=key_missing_var, foreground="#b02020")
+    key_missing_label.grid(row=row, column=1, sticky="w", pady=(0, 4))
+    row += 1
+
+    def _refresh_key_warning() -> None:
+        backend_value = _backend_label_to_value(backend_var.get())
+        if backend_value == "cloud" and not api_key_var.get().strip():
+            key_missing_var.set("Cloud mode needs a Groq API key")
+        else:
+            key_missing_var.set("")
+
+    backend_combo.bind("<<ComboboxSelected>>", lambda _e: _refresh_key_warning())
+    api_key_entry.bind("<KeyRelease>", lambda _e: _refresh_key_warning())
+    _refresh_key_warning()
+
+    test_status_var = tk.StringVar(value="")
+    test_row_frame = ttk.Frame(frame)
+    test_row_frame.grid(row=row, column=1, sticky="w", pady=(0, 4))
+
+    def _on_test_connection() -> None:
+        groq_check = deps.get("groq_check")
+        if not groq_check:
+            return
+
+        class _ProbeConfig:
+            pass
+
+        probe_cfg = _ProbeConfig()
+        probe_cfg.groq_api_key = api_key_var.get()
+
+        test_status_var.set("Testing…")
+
+        def _run():
+            try:
+                ok, msg = groq_check(probe_cfg)
+            except Exception as exc:
+                ok, msg = False, str(exc)
+
+            def _apply():
+                test_status_var.set(("Connected" if ok else msg))
+
+            try:
+                win.after(0, _apply)
+            except Exception:
+                pass
+
+        import threading as _threading
+
+        _threading.Thread(target=_run, daemon=True).start()
+
+    ttk.Button(test_row_frame, text="Test connection", command=_on_test_connection).pack(
+        side="left"
+    )
+    ttk.Label(test_row_frame, textvariable=test_status_var).pack(side="left", padx=(6, 0))
+    row += 1
+
     # --- Checkboxes -----------------------------------------------------
     fillers_var = tk.BooleanVar(value=cfg.clean_fillers)
     ttk.Checkbutton(frame, text="Remove filler words", variable=fillers_var).grid(
@@ -371,6 +495,20 @@ def open_settings(root, cfg, deps: Dict[str, Callable]) -> None:
             cb = deps.get("on_show_overlay_change")
             if cb:
                 cb(new_show_overlay)
+
+        new_api_key = api_key_var.get()
+        if new_api_key != cfg.groq_api_key:
+            cfg.groq_api_key = new_api_key
+            cb = deps.get("on_groq_api_key_change")
+            if cb:
+                cb(new_api_key)
+
+        new_backend = _backend_label_to_value(backend_var.get())
+        if new_backend != cfg.backend:
+            cfg.backend = new_backend
+            cb = deps.get("on_backend_change")
+            if cb:
+                cb(new_backend)
 
         cfg.save()
         _on_close()

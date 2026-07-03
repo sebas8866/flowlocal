@@ -131,6 +131,15 @@ class Transcriber:
 
         self.warmup()
 
+    def release(self) -> None:
+        """Free the loaded model (if any) so its GPU/CPU memory can be
+        reclaimed, e.g. when switching to the cloud backend. A later
+        transcribe() call lazily reloads the model as usual; this does not
+        trip `_reload_failed`.
+        """
+        with self._lock:
+            self._free_model_locked()
+
     def _free_model_locked(self) -> None:
         """Drop the current model reference and force a GC pass so CUDA/CPU
         memory is released before a replacement model is constructed.

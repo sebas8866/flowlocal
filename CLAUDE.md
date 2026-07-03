@@ -9,7 +9,7 @@ Windows tray app: push-to-talk (keyboard or mouse side button) → faster-whispe
 
 ## Rules
 
-- **No cloud calls anywhere.** The only external process FlowLocal talks to is Ollama on `127.0.0.1` (optional, for transcript cleanup). Never add a network call to any other host.
+- **Local by default.** The only permitted external hosts are Ollama on `127.0.0.1` (optional, for transcript cleanup) and `api.groq.com` — and the latter only when `cfg.backend == "cloud"` and the user has supplied their own API key. Never add a network call to any other host, and never add telemetry.
 - Config lives at `%APPDATA%\FlowLocal\config.json` — see [specs/001-flowlocal-dictation/contracts/config-schema.md](specs/001-flowlocal-dictation/contracts/config-schema.md) for the full field contract. The app must never crash on a missing or malformed config; invalid fields reset to defaults.
 
 ## Tests
