@@ -11,7 +11,12 @@ import time
 
 logger = logging.getLogger(__name__)
 
-_RESTORE_DELAY_SECONDS = 0.4
+# Windows' clipboard-history service (Win+V) samples the clipboard
+# asynchronously; a shorter delay risks the dictation entry being
+# overwritten by the restore before that service captures it, so it never
+# shows up in history. 600ms gives it enough time while still feeling
+# instant to the user.
+_RESTORE_DELAY_SECONDS = 0.6
 _CLIPBOARD_RETRY_ATTEMPTS = 10
 _CLIPBOARD_RETRY_DELAY_SECONDS = 0.05
 

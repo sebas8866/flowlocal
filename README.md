@@ -56,6 +56,7 @@ Run FlowLocal with:
 - **Tray icon** → *Settings* to change microphone, trigger binding, model, language, and cleanup toggles.
 - A **bottom waveform pill** shows the current state (idle / recording / transcribing). Hover it after a dictation to copy the last result.
 - If text can't be pasted into the focused window (e.g. an elevated app), a small popup appears — the text stays on your clipboard so you can paste it manually.
+- Every dictation also lands in Windows clipboard history (**Win+V**), right behind your latest copy — requires Windows Settings → System → Clipboard → Clipboard history to be turned on. FlowLocal restores your previous clipboard content after pasting, so your own latest copy stays on top.
 
 ## Configuration
 

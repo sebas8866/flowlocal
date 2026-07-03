@@ -50,6 +50,20 @@ _AUTO_EXPAND_MS = 5000
 _LEAVE_GRACE_MS = 400
 _COPIED_COLLAPSE_MS = 1000
 
+# Popup panel ("Wispr-clean" white card) — matches flowlocal/ui/theme.py
+# light tokens (PANEL_BG/CARD_BORDER/TEXT/TEXT_SECONDARY/ACCENT).
+_PANEL_BG = "#FFFFFF"
+_PANEL_BORDER = "#E8E4DC"
+_PANEL_RADIUS = 12
+_PANEL_TEXT_COLOR = "#1A1A1A"
+_PANEL_HINT_COLOR = "#6B6660"
+_PANEL_ACCENT = "#E8623D"
+_PANEL_PAD_X = 16
+_PANEL_PAD_Y = 14
+_PANEL_MAX_WIDTH = 420
+_PANEL_ACCENT_STRIP_W = 3
+_PANEL_MAX_TEXT_LINES = 8
+
 # Idle (thin line) pill geometry.
 _IDLE_W = 64
 _IDLE_H = 10
@@ -180,8 +194,10 @@ class _StatusPill:
         self._bar_items: list = []  # canvas item ids for waveform bars
 
         self._panel: Optional["tk.Toplevel"] = None
+        self._panel_canvas = None
         self._panel_label = None
         self._panel_hint_var = None
+        self._panel_hint_label = None
 
         self._canvas.bind("<Enter>", self._on_pill_enter)
         self._canvas.bind("<Leave>", self._on_pill_leave)
@@ -480,6 +496,28 @@ class _StatusPill:
         self._cancel_auto_collapse()
         self._expand_job = self._win.after(delay_ms, self._collapse_panel)
 
+    def _draw_rounded_rect(self, canvas, x0, y0, x1, y1, radius, **kwargs) -> int:
+        """Draw a filled/outlined rounded rectangle on `canvas` via a smoothed
+        polygon (the standard tkinter rounded-rect trick) and return its item
+        id. Same genuinely-rounded-corners approach the pill uses, adapted
+        from ovals+rect (pill, capsule-shaped) to a smoothed polygon (panel,
+        a real rectangle with corner radius)."""
+        points = [
+            x0 + radius, y0,
+            x1 - radius, y0,
+            x1, y0,
+            x1, y0 + radius,
+            x1, y1 - radius,
+            x1, y1,
+            x1 - radius, y1,
+            x0 + radius, y1,
+            x0, y1,
+            x0, y1 - radius,
+            x0, y0 + radius,
+            x0, y0,
+        ]
+        return canvas.create_polygon(points, smooth=True, **kwargs)
+
     def _expand_panel(self) -> None:
         import tkinter as tk
 
@@ -501,44 +539,104 @@ class _StatusPill:
             panel.attributes("-toolwindow", True)
         except Exception:
             pass
+        try:
+            panel.attributes("-transparentcolor", _MAGIC_TRANSPARENT_COLOR)
+        except Exception as exc:
+            logger.debug("transparentcolor unavailable for panel: %s", exc)
+        panel.configure(bg=_MAGIC_TRANSPARENT_COLOR)
 
-        outer = tk.Frame(panel, bg="#1e1e1e", padx=16, pady=10)
-        outer.pack(fill="both", expand=True)
-
+        # Measure the wrapped text first (off-screen label) so we can size
+        # the card, then draw the rounded card on a canvas and lay the text
+        # + hint on top of it via create_window — keeps the transparent-key
+        # rounding technique consistent with the pill.
         display_text = _truncate(self._last_text)
-        label = tk.Label(
-            outer,
+        wrap_width = _PANEL_MAX_WIDTH - 2 * _PANEL_PAD_X - _PANEL_ACCENT_STRIP_W
+
+        probe = tk.Label(
+            panel,
             text=display_text,
-            bg="#1e1e1e",
-            fg="#eeeeee",
-            font=("Segoe UI", 10),
-            wraplength=600,
+            font=("Segoe UI", 11),
+            wraplength=wrap_width,
             justify="left",
-            anchor="w",
         )
-        label.pack(fill="x")
+        probe.update_idletasks()
+        text_w = min(probe.winfo_reqwidth(), wrap_width)
+        text_h = probe.winfo_reqheight()
+        max_text_h = _PANEL_MAX_TEXT_LINES * 16
+        if text_h > max_text_h:
+            text_h = max_text_h
+        probe.destroy()
+
+        card_w = text_w + 2 * _PANEL_PAD_X + _PANEL_ACCENT_STRIP_W
+        card_w = min(max(card_w, 160), _PANEL_MAX_WIDTH)
+        hint_h = 16
+        card_h = _PANEL_PAD_Y + text_h + 4 + hint_h + _PANEL_PAD_Y
+
+        canvas = tk.Canvas(
+            panel,
+            width=card_w,
+            height=card_h,
+            bg=_MAGIC_TRANSPARENT_COLOR,
+            highlightthickness=0,
+            bd=0,
+        )
+        canvas.pack(fill="both", expand=True)
+        self._panel_canvas = canvas
+
+        self._draw_rounded_rect(
+            canvas, 0, 0, card_w, card_h, _PANEL_RADIUS,
+            fill=_PANEL_BG, outline=_PANEL_BORDER, width=1,
+        )
+        # Subtle coral accent strip along the card's left edge, inset
+        # slightly so it stays inside the card's own rounded corners.
+        strip_inset = _PANEL_RADIUS * 0.4
+        self._draw_rounded_rect(
+            canvas,
+            2, strip_inset, 2 + _PANEL_ACCENT_STRIP_W, card_h - strip_inset,
+            _PANEL_ACCENT_STRIP_W / 2.0,
+            fill=_PANEL_ACCENT, outline="",
+        )
+
+        text_x = _PANEL_ACCENT_STRIP_W + _PANEL_PAD_X
+        label = tk.Label(
+            canvas,
+            text=display_text,
+            bg=_PANEL_BG,
+            fg=_PANEL_TEXT_COLOR,
+            font=("Segoe UI", 11),
+            wraplength=wrap_width,
+            justify="left",
+            anchor="nw",
+        )
+        canvas.create_window(
+            text_x, _PANEL_PAD_Y, width=text_w, height=text_h,
+            window=label, anchor="nw",
+        )
         self._panel_label = label
 
-        hint_var = tk.StringVar(value="click to copy")
+        hint_var = tk.StringVar(value="Click to copy")
         self._panel_hint_var = hint_var
         hint_label = tk.Label(
-            outer,
+            canvas,
             textvariable=hint_var,
-            bg="#1e1e1e",
-            fg="#888888",
-            font=("Segoe UI", 8),
+            bg=_PANEL_BG,
+            fg=_PANEL_HINT_COLOR,
+            font=("Segoe UI", 9),
             anchor="w",
         )
-        hint_label.pack(fill="x", pady=(4, 0))
+        canvas.create_window(
+            text_x, _PANEL_PAD_Y + text_h + 4, width=text_w, height=hint_h,
+            window=hint_label, anchor="nw",
+        )
+        self._panel_hint_label = hint_label
 
-        for widget in (panel, outer, label, hint_label):
+        for widget in (panel, canvas, label, hint_label):
             widget.bind("<Enter>", self._on_panel_enter)
             widget.bind("<Leave>", self._on_panel_leave)
             widget.bind("<Button-1>", self._on_panel_click)
 
-        panel.update_idletasks()
-        panel_width = panel.winfo_reqwidth()
-        panel_height = panel.winfo_reqheight()
+        panel_width = card_w
+        panel_height = card_h
         win_x = self._win.winfo_x()
         win_y = self._win.winfo_y()
         screen_width = self._win.winfo_screenwidth()
@@ -561,7 +659,9 @@ class _StatusPill:
         try:
             self._panel_label.config(text=_truncate(self._last_text))
             if self._panel_hint_var is not None:
-                self._panel_hint_var.set("click to copy")
+                self._panel_hint_var.set("Click to copy")
+            if self._panel_hint_label is not None:
+                self._panel_hint_label.config(fg=_PANEL_HINT_COLOR)
         except Exception:
             pass
 
@@ -578,7 +678,12 @@ class _StatusPill:
 
         self._cancel_auto_collapse()
         if self._panel_hint_var is not None:
-            self._panel_hint_var.set("copied ✓")
+            self._panel_hint_var.set("Copied ✓")
+        if self._panel_hint_label is not None:
+            try:
+                self._panel_hint_label.config(fg=_PANEL_ACCENT)
+            except Exception:
+                pass
         if self._copied_job is not None:
             try:
                 self._win.after_cancel(self._copied_job)
@@ -603,8 +708,10 @@ class _StatusPill:
             except Exception:
                 pass
             self._panel = None
+            self._panel_canvas = None
             self._panel_label = None
             self._panel_hint_var = None
+            self._panel_hint_label = None
 
     def destroy(self) -> None:
         self._cancel_grow()
