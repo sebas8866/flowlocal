@@ -52,7 +52,7 @@ Run FlowLocal with:
 
 (or just let it auto-start on the next login — autostart is enabled by `setup.ps1`).
 
-- **Default trigger**: mouse forward/side button (X2) — hold it, speak, release.
+- **Default trigger**: mouse forward/side button (X2) — hold it, speak, release. Hold mode is push-to-talk: hold down (≥350ms), speak, release to stop and transcribe. Quick double-tap (release within 350ms, then press again within 400ms) locks recording hands-free — speak freely with your hands off the trigger; press again to stop and transcribe. A quick tap with no follow-up press just finishes normally once the 400ms window passes (nothing is lost, since recording never actually stopped). Esc cancels a recording (including a locked one) without transcribing.
 - **Tray icon** → *Settings* to change microphone, trigger binding, model, language, and cleanup toggles.
 - A **bottom waveform pill** shows the current state (idle / recording / transcribing). Hover it after a dictation to copy the last result.
 - If text can't be pasted into the focused window (e.g. an elevated app), a small popup appears — the text stays on your clipboard so you can paste it manually.

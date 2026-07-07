@@ -14,6 +14,9 @@ import threading
 import time
 from typing import Callable, Dict, List, Optional, Set
 
+from flowlocal.flow_gesture import IDLE as _GESTURE_IDLE
+from flowlocal.flow_gesture import FlowGesture
+
 logger = logging.getLogger(__name__)
 
 # Any held key older than this is considered stuck (a release event was
@@ -191,6 +194,14 @@ class TriggerManager:
         self._trigger_active = False
         self._toggle_state = False
 
+        # Hold-mode double-tap-latch gesture (see flowlocal/flow_gesture.py).
+        # Toggle mode never touches this; hold mode's _fire_press/_fire_release
+        # delegate to it instead of calling on_press/on_release directly.
+        self._gesture = FlowGesture(
+            fire_press=self._raw_fire_press,
+            fire_release=self._raw_fire_release,
+        )
+
         self._keyboard_listener = None
         self._mouse_listener = None
 
@@ -217,12 +228,17 @@ class TriggerManager:
             self._held_key_times.clear()
             self._trigger_active = False
             self._toggle_state = False
+        # Outside self._lock (gesture has its own lock; never call back into
+        # ours) so a rebind can never leave a stale latch-window timer armed,
+        # which would otherwise fire a release against the new binding.
+        self._gesture.reset()
 
     def set_mode(self, mode: str) -> None:
         with self._lock:
             self.mode = mode
             self._trigger_active = False
             self._toggle_state = False
+        self._gesture.reset()
 
     def start(self) -> None:
         from pynput import keyboard, mouse
@@ -248,6 +264,9 @@ class TriggerManager:
         if self._mouse_listener is not None:
             self._mouse_listener.stop()
             self._mouse_listener = None
+        # Cancel any pending latch-window timer so it can't fire a release
+        # after the manager (and whatever it was wired to) has torn down.
+        self._gesture.reset()
 
     def capture_next(self, callback: Callable[[str], None]) -> None:
         """One-shot mode: the next key press or mouse x-button press is
@@ -416,6 +435,7 @@ class TriggerManager:
 
     def _handle_key_press(self, name: str) -> None:
         cancel_cb = None
+        cancel_gesture = False
 
         with self._lock:
             if self._capture_mode:
@@ -432,8 +452,18 @@ class TriggerManager:
                     cb(binding)
                 return
 
+            # In hold mode, a quick tap clears _trigger_active on release
+            # (see _handle_key_release) even though the gesture has kept
+            # recording running (TAP_WAIT waiting for a possible latch, or
+            # LATCHED hands-free) — so an in-progress hold-mode recording
+            # must also be detected via the gesture's own state, not just
+            # _trigger_active, or Esc would be treated as a plain key press
+            # during those windows instead of canceling.
+            gesture_active = self.mode == "hold" and self._gesture.state != _GESTURE_IDLE
             if name == "esc" and (
-                self._trigger_active or (self.mode == "toggle" and self._toggle_state)
+                self._trigger_active
+                or gesture_active
+                or (self.mode == "toggle" and self._toggle_state)
             ):
                 # Esc cancels an in-progress recording instead of behaving
                 # like a normal held key: reset all trigger state and fire
@@ -443,6 +473,7 @@ class TriggerManager:
                 self._held_keys.clear()
                 self._held_key_times.clear()
                 cancel_cb = self.on_cancel
+                cancel_gesture = True
             else:
                 self._held_keys.add(name)
                 self._held_key_times[name] = time.monotonic()
@@ -455,6 +486,13 @@ class TriggerManager:
                 already_active = self._trigger_active
                 if is_match:
                     self._trigger_active = True
+
+        if cancel_gesture:
+            # Reset the gesture (and cancel any pending latch-window timer)
+            # BEFORE on_cancel, so a latched hands-free session cancels
+            # cleanly rather than leaving a timer that could later fire a
+            # stray release.
+            self._gesture.reset()
 
         if cancel_cb is not None:
             cancel_cb()
@@ -540,8 +578,12 @@ class TriggerManager:
         with self._lock:
             self._prune_stuck_keys()
         if mode == "hold":
-            if self.on_press:
-                self.on_press()
+            # Hold mode's press/release semantics (including the
+            # double-tap-latch upgrade) are owned entirely by
+            # FlowGesture — see flowlocal/flow_gesture.py. The gesture
+            # calls back into _raw_fire_press/_raw_fire_release, which are
+            # the actual on_press()/on_release() invocations.
+            self._gesture.press()
         elif mode == "toggle":
             with self._lock:
                 currently_recording = self._toggle_state
@@ -567,6 +609,28 @@ class TriggerManager:
 
     def _fire_release(self, mode: str) -> None:
         if mode == "hold":
-            if self.on_release:
-                self.on_release()
+            self._gesture.release()
         # toggle mode fires entirely on press; release is a no-op.
+
+    def _raw_fire_press(self) -> Optional[bool]:
+        """FlowGesture's fire_press callback: the actual on_press()
+        invocation, run only when the gesture decides a press should
+        really start a recording (i.e. from IDLE). Passes through on_press's
+        accept/reject bool (None treated as accepted, same convention as
+        toggle mode) so the gesture can reset to IDLE on rejection.
+        """
+        if not self.on_press:
+            return True
+        return self.on_press()
+
+    def _raw_fire_release(self) -> None:
+        """FlowGesture's fire_release callback: the actual on_release()
+        invocation. May run on a timer thread (latch-window expiry) or on
+        the hook thread (a normal hold release, or the press that stops a
+        latched session) — app.py's on_release (_on_trigger_release) is
+        already tolerant of running off the hook thread (see app.py's
+        threading-model docstring: it only does a quick atomic claim and
+        hands the actual stop/finish work to a daemon thread).
+        """
+        if self.on_release:
+            self.on_release()

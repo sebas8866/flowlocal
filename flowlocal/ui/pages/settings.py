@@ -55,6 +55,11 @@ _BACKEND_PRESETS = [
     ("cloud", "Cloud (Groq — fastest, needs internet)"),
 ]
 
+_MODE_PRESETS = [
+    ("hold", "Hold to talk (double-tap to lock)"),
+    ("toggle", "toggle"),
+]
+
 
 def _label_for(pairs, value, default_index=0):
     for v, lbl in pairs:
@@ -172,11 +177,11 @@ class SettingsPage:
         mode_row = ctk.CTkFrame(inner, fg_color="transparent")
         mode_row.pack(fill="x", pady=4)
         ctk.CTkLabel(mode_row, text="Mode", font=theme.font(12), text_color=theme.TEXT, width=140, anchor="w").pack(side="left")
-        self._mode_var = ctk.StringVar(value=self.cfg.mode)
+        self._mode_var = ctk.StringVar(value=_label_for(_MODE_PRESETS, self.cfg.mode))
         ctk.CTkSegmentedButton(
             mode_row,
             variable=self._mode_var,
-            values=["hold", "toggle"],
+            values=[lbl for _v, lbl in _MODE_PRESETS],
             fg_color=theme.SIDEBAR_BG,
             selected_color=theme.ACCENT,
             selected_hover_color=theme.ACCENT_HOVER,
@@ -486,7 +491,7 @@ class SettingsPage:
             if cb:
                 cb(new_trigger)
 
-        new_mode = self._mode_var.get()
+        new_mode = _value_for(_MODE_PRESETS, self._mode_var.get())
         if new_mode != cfg.mode:
             cfg.mode = new_mode
             cb = deps.get("on_mode_change")

@@ -61,9 +61,21 @@ class MouseFilterDispatchTest(unittest.TestCase):
         self.assertEqual(events, ["press"])
 
     def test_bound_button_release_fires_and_suppresses(self):
+        # Hold-mode press/release now funnels through FlowGesture (see
+        # flowlocal/flow_gesture.py), which distinguishes a real hold
+        # (>= TAP_MS between press and release) from a quick tap (which
+        # keeps recording running and arms the double-tap-latch window
+        # instead of firing release immediately). This test's original
+        # intent — a plain hold-and-release fires release synchronously —
+        # is preserved by advancing the gesture's injected clock past
+        # TAP_MS between the press and release events, same as a real
+        # press held for a beat before letting go.
         mgr, events = self._manager()
+        fake_now = [0.0]
+        mgr._gesture._clock = lambda: fake_now[0]
         with self.assertRaises(_Suppressed):
             mgr._mouse_event_filter(_WM_XBUTTONDOWN, _MouseData(2))
+        fake_now[0] += 0.5  # 500ms held: a hold, not a tap
         with self.assertRaises(_Suppressed):
             mgr._mouse_event_filter(_WM_XBUTTONUP, _MouseData(2))
         self.assertEqual(events, ["press", "release"])
@@ -114,9 +126,19 @@ class KeyboardFilterDispatchTest(unittest.TestCase):
         return mgr, events
 
     def test_bound_single_key_fires_and_suppresses(self):
+        # See the analogous comment in MouseFilterDispatchTest
+        # .test_bound_button_release_fires_and_suppresses: hold-mode
+        # press/release now funnels through FlowGesture, which needs
+        # >= TAP_MS between press and release to treat this as a hold
+        # (rather than a quick tap that keeps recording running). Advance
+        # the gesture's injected clock accordingly to represent a real held
+        # keypress, preserving this test's original intent.
         mgr, events = self._manager("key:f9")
+        fake_now = [0.0]
+        mgr._gesture._clock = lambda: fake_now[0]
         with self.assertRaises(_Suppressed):
             mgr._keyboard_event_filter(_WM_KEYDOWN, _KeyData(0x78))
+        fake_now[0] += 0.5  # 500ms held: a hold, not a tap
         with self.assertRaises(_Suppressed):
             mgr._keyboard_event_filter(_WM_KEYUP, _KeyData(0x78))
         self.assertEqual(events, ["press", "release"])
