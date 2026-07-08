@@ -7,3 +7,12 @@ snap_*.txt
 diag*.txt
 log_snapshot.txt
 boot_trace.txt
+
+# Local runtime state — never commit. The real files live in
+# %APPDATA%\FlowLocal\, but guard against a stray copy in the repo dir.
+# config.json holds the user's Groq API key in plaintext (user-local).
+config.json
+history.json
+.env
+.env.*
+*.secret
