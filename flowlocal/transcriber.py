@@ -67,13 +67,26 @@ def _add_nvidia_dll_dirs() -> None:
                 nvidia_root = os.path.join(sp, "nvidia")
                 if not os.path.isdir(nvidia_root):
                     continue
+#                for bin_dir in glob.glob(os.path.join(nvidia_root, "*", "bin")):
+#                    if os.path.isdir(bin_dir):
+#                        try:
+#                            os.add_dll_directory(bin_dir)
+#                            logger.debug("Added DLL directory: %s", bin_dir)
+#                        except OSError as exc:
+#                            logger.debug("Could not add DLL directory %s: %s", bin_dir, exc)
                 for bin_dir in glob.glob(os.path.join(nvidia_root, "*", "bin")):
                     if os.path.isdir(bin_dir):
                         try:
-                            os.add_dll_directory(bin_dir)
+                            # Tell Python where to look
+                            os.add_dll_directory(bin_dir) 
+                            
+                            # Tell native C++ libraries (like CTranslate2) where to look
+                            os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+                            
                             logger.debug("Added DLL directory: %s", bin_dir)
                         except OSError as exc:
                             logger.debug("Could not add DLL directory %s: %s", bin_dir, exc)
+
         except Exception as exc:
             logger.debug("Failed to scan for nvidia DLL directories: %s", exc)
 

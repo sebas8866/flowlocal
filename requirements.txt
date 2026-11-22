@@ -9,3 +9,4 @@ requests==2.34.2
 comtypes==1.4.16
 customtkinter==6.0.0
 darkdetect==0.8.0
+olefile
