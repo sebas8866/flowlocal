@@ -1,16 +1,16 @@
 # FlowLocal
 
-Fully local, free voice dictation for Windows — a self-hosted alternative to Wispr Flow.
+Free, open-source voice dictation for Windows that runs on your own machine.
 
-Hold a key or your mouse's side button, speak, release — clean, punctuated text is pasted into whatever app has focus. Speech-to-text runs on your machine with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (Whisper large-v3-turbo), and transcripts are cleaned up automatically: filler words removed, grammar fixed, false starts and repetitions collapsed — optionally using a local [Ollama](https://ollama.com) LLM for higher-quality rewrites. No audio or text ever leaves the machine.
+Hold a key or your mouse's side button, speak, release — clean, punctuated text is pasted into whatever app has focus. Speech-to-text runs on your machine with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (Whisper large-v3-turbo), and transcripts are cleaned up automatically: filler words removed, grammar fixed, false starts and repetitions collapsed — optionally using a local [Ollama](https://ollama.com) LLM for higher-quality rewrites. In the default local mode, no audio or text leaves your machine. An optional [cloud mode](#cloud-mode-optional) is off unless you turn it on.
 
-- **100% offline** after the first model download
+- **Works offline** after the first model download (default local mode)
 - **No accounts, no subscriptions, no telemetry**
 - Push-to-talk from **any keyboard key or mouse side button**
-- Runs quietly in the **system tray**, with a Wispr-style waveform pill at the bottom of the screen
+- Runs quietly in the **system tray**, with a small waveform pill at the bottom of the screen
 - Auto-starts with Windows
 
-## Why it beats Wispr Flow
+## Features
 
 - **Personal dictionary** — teach it names, product terms, and jargon once (Settings → Personal dictionary); they bias both speech recognition and the cleanup rewrite so they stop getting mangled.
 - **App-aware tone** — FlowLocal notices what app you're dictating into (Discord vs. Outlook vs. a code editor) and nudges the cleanup rewrite to match that app's natural style, without changing what you said.
@@ -40,7 +40,7 @@ cd flowlocal
 - The Whisper `large-v3-turbo` model (**~1.6 GB**, one-time, cached locally afterwards)
 - NVIDIA CUDA 12 pip wheels for GPU acceleration (only if an NVIDIA GPU is detected)
 
-Both are one-time downloads — everything after that is fully offline.
+Both are one-time downloads, and local dictation works offline after that. `setup.ps1` also turns on start-with-Windows. You can switch that off in Settings.
 
 ## Usage
 
@@ -92,7 +92,7 @@ Default `filler_words`: `um, uh, uhm, er, ah, like, you know, i mean, sort of, k
 
 ## The app window
 
-Double-click the tray icon (or right-click → "Open FlowLocal") to open the app window — a Wispr Flow-style home base with four pages:
+Double-click the tray icon (or right-click → "Open FlowLocal") to open the app window — a home base with four pages:
 
 - **Home** — today's word count, total words, average WPM, and current day streak, plus your 5 most recent dictations.
 - **History** — every past dictation, newest first, with live search and per-entry copy; "Clear history" needs a second confirming click.
@@ -107,13 +107,13 @@ The window supports light, dark, and system theme (toggle at the bottom of the s
 
 By default FlowLocal runs 100% locally: the Whisper model and the Ollama cleanup model both load into your GPU's VRAM, which can slow the machine down during dictation. Cloud mode offloads both steps — transcription and cleanup — to [Groq](https://groq.com)'s API instead, so your GPU and CPU stay idle. Local stays the default; this is opt-in.
 
-**What it does**: when `backend` is set to `cloud`, FlowLocal sends your recorded audio to `api.groq.com` for transcription and, if LLM cleanup is enabled, sends the raw transcript there again for the grammar/false-start rewrite. No local models are loaded or warmed up in this mode.
+**What it does**: when `backend` is set to `cloud`, FlowLocal sends your recorded audio to `api.groq.com` for transcription and, if LLM cleanup is enabled, sends the raw transcript there again for the grammar/false-start rewrite. Depending on your settings, those requests can also include your personal dictionary, the tail of your previous dictation, and the active app name and window title (up to 80 characters). No local models are loaded or warmed up in this mode.
 
 **Getting a free key**: sign up at [console.groq.com/keys](https://console.groq.com/keys) and create an API key — Groq's free tier is generous and fast.
 
 **Enabling it**: open Settings → *Processing* → choose "Cloud (Groq — fastest, needs internet)", paste your API key, and click "Test connection" to confirm it works before saving.
 
-**Privacy note**: with cloud mode enabled, your dictated audio (and the raw transcript, for cleanup) is sent to Groq's servers. The default configuration never sends anything anywhere — cloud mode is entirely opt-in and can be switched off at any time.
+**Privacy note**: with cloud mode enabled, the data above is sent to Groq's servers. Window titles can contain private details such as an email subject or document name, so turn off `smart_context` if that matters to you. The default local configuration does not send your audio or text anywhere. Cloud mode is opt-in and can be switched off at any time.
 
 **Where the key is stored**: like the rest of your settings, the Groq API key is saved in plaintext at `%APPDATA%\FlowLocal\config.json`. This file is user-local (not synced or shared); treat it like any other local secret.
 
@@ -134,6 +134,16 @@ If a cloud transcription call fails (bad key, network issue, etc.), FlowLocal au
 2. Remove the autostart entry: delete the `FlowLocal` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (or toggle "Autostart" off in Settings before quitting).
 3. Delete the project folder and `%APPDATA%\FlowLocal`.
 4. Optional: the Whisper model is cached in the Hugging Face cache (`%USERPROFILE%\.cache\huggingface`) — delete it there if you want the disk space back and don't use it for anything else.
+
+## Contributing
+
+Bug reports and pull requests are welcome. Please include your Windows version, GPU, and the relevant lines from `%APPDATA%\FlowLocallowlocal.log`, and remove anything private from the log first.
+
+Run the tests before opening a PR:
+
+```powershell
+.venv\Scripts\python.exe -m unittest discover tests
+```
 
 ## License
 
