@@ -1,3 +1,3 @@
 nvidia-cublas-cu12==12.9.2.10
 nvidia-cudnn-cu12==9.24.0.43
-nvidia-cuda-runtime-cu12
+nvidia-cuda-runtime-cu12==12.9.79
